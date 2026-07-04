@@ -33,7 +33,7 @@
 #define DEFAULT_TOPS_HIGHPASS  120.0f   // Hz  Tops-Hochpass
 
 // --- Tops-Delay (Synchronisation zum Sub/Horn) -----------------------
-#define DEFAULT_TOPS_DELAY_MS  5.0f     // ms
+#define DEFAULT_TOPS_DELAY_MS  0.0f     // ms
 
 // --- Lautstärke (0.0 .. 1.0) ----------------------------------------
 #define DEFAULT_VOL_TOPS       0.8f
@@ -52,3 +52,35 @@
 #define DEFAULT_LIM_TOPS_REL    100.0f
 #define DEFAULT_LIM_SUB_THRESH  32000.0f
 #define DEFAULT_LIM_SUB_REL     150.0f
+
+// --- DAC-Kanal-Routing -----------------------------------------------
+// Legt fest, welches Signal auf jedem der vier DAC-Ausgänge liegt.
+// Beide DACs haben je einen L- und R-Kanal.
+//
+// Mögliche Werte:
+//   DAC_CH_OFF     – Stille
+//   DAC_CH_SUB     – Subwoofer (Tiefpass + Subsonic, Mono-Mix, vol_sub)
+//   DAC_CH_MONO    – Stereo auf Mono gemischt, kein Filter  (vol_tops)
+//   DAC_CH_TOPS_L  – Hochpass links  (vol_tops)
+//   DAC_CH_TOPS_R  – Hochpass rechts (vol_tops)
+//   DAC_CH_LEFT    – Eingang L, ungefiltert
+//   DAC_CH_RIGHT   – Eingang R, ungefiltert
+//
+// Hinweis: Jede Filter-Instanz darf pro Sample-Frame nur EINMAL
+// aufgerufen werden. DAC_CH_SUB oder DAC_CH_TOPS_L/R also nicht
+// mehrfach parallel belegen.
+#define DAC_CH_OFF     0
+#define DAC_CH_SUB     1
+#define DAC_CH_MONO    2
+#define DAC_CH_TOPS_L  3
+#define DAC_CH_TOPS_R  4
+#define DAC_CH_LEFT    5
+#define DAC_CH_RIGHT   6
+
+// DAC 1 (Pins TOPS_PIN_*): Kanal-Belegung
+#define DAC1_L_MODE    DAC_CH_SUB     // L = Subwoofer
+#define DAC1_R_MODE    DAC_CH_MONO    // R = Stereo auf Mono
+
+// DAC 2 (Pins SUB_PIN_*): Kanal-Belegung
+#define DAC2_L_MODE    DAC_CH_TOPS_L
+#define DAC2_R_MODE    DAC_CH_TOPS_R

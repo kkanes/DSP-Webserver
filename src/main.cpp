@@ -51,10 +51,19 @@ const float sample_rate = SAMPLE_RATE;
 // Tops-Delay (zur Laufzeit-Synchronisation mit dem Horn/Sub)
 float tops_delay_ms = DEFAULT_TOPS_DELAY_MS;
 const int TOPS_DELAY_MAX = 1400;              // ~31.7 ms @ 44.1 kHz
-float tops_dly_L[TOPS_DELAY_MAX] = {0};
-float tops_dly_R[TOPS_DELAY_MAX] = {0};
-int tops_dly_idx = 0;
+// Delay-Ring-Buffer DAC 1 und DAC 2 (je L + R, unabhängig voneinander)
+float dac1_dly_L[TOPS_DELAY_MAX] = {0};
+float dac1_dly_R[TOPS_DELAY_MAX] = {0};
+int   dac1_dly_idx = 0;
+float dac2_dly_L[TOPS_DELAY_MAX] = {0};
+float dac2_dly_R[TOPS_DELAY_MAX] = {0};
+int   dac2_dly_idx = 0;
 volatile int tops_delay_samples = 0;
+
+// Rohsignal-Sicherung: process_dac1 speichert hier die unmodifizierten Eingangs-
+// Samples, damit process_dac2 unabhängig davon auf die Originaldaten zugreift.
+static int16_t s_raw_buf[1024];   // 512 Stereo-Frames = 2 KB
+static size_t  s_raw_len = 0;
 
 // Globale Lautstärkefaktoren (0.0 bis 1.0)
 float vol_tops = DEFAULT_VOL_TOPS;
@@ -206,50 +215,101 @@ struct PeakLimiter {
 PeakLimiter lim_tops;   // Tops (stereo, gemeinsamer Gain für L/R)
 PeakLimiter lim_sub;    // Sub  (mono)
 
-// Audio-Verarbeitung für die Tops (DAC 1) inkl. Lautstärkeregelung
-size_t process_tops(uint8_t *data, size_t len) {
-    int16_t *samples = (int16_t*) data;
-    for (int i = 0; i < len / 2; i += 2) {
-        float l = tops_hp_L2.process(tops_hp_L.process(samples[i])) * vol_tops;
-        float r = tops_hp_R2.process(tops_hp_R.process(samples[i + 1])) * vol_tops;
+// Berechnet den float-Ausgabewert für einen konfigurierten DAC-Kanal.
+// raw_l / raw_r = UNVERARBEITETE 16-Bit-Eingangswerte als float.
+// Jede Filter-Instanz darf pro Sample-Frame nur einmal aufgerufen werden –
+// denselben Modus also nie auf zwei Kanälen gleichzeitig konfigurieren.
+static float compute_ch(int mode, float raw_l, float raw_r) {
+    switch (mode) {
+        case DAC_CH_SUB: {
+            float m = 0.5f * (raw_l + raw_r);
+            m = sub_sub_L2.process(sub_sub_L.process(m));
+            return sub_lp_L2.process(sub_lp_L.process(m)) * vol_sub;
+        }
+        case DAC_CH_MONO:
+            return 0.5f * (raw_l + raw_r) * vol_tops;
+        case DAC_CH_TOPS_L:
+            return tops_hp_L2.process(tops_hp_L.process(raw_l)) * vol_tops;
+        case DAC_CH_TOPS_R:
+            return tops_hp_R2.process(tops_hp_R.process(raw_r)) * vol_tops;
+        case DAC_CH_LEFT:
+            return raw_l;
+        case DAC_CH_RIGHT:
+            return raw_r;
+        default:            // DAC_CH_OFF
+            return 0.0f;
+    }
+}
 
-        // Delay-Line (Ringpuffer) zur Synchronisation mit dem Sub/Horn
-        tops_dly_L[tops_dly_idx] = l;
-        tops_dly_R[tops_dly_idx] = r;
-        int rd = tops_dly_idx - tops_delay_samples;
+// Gibt an, ob ein Kanal-Modus die Tops-Delay-Line nutzen soll
+// (Synchronisation Tops/Mono mit dem Sub).
+static inline bool ch_uses_delay(int mode) {
+    return (mode == DAC_CH_MONO || mode == DAC_CH_TOPS_L || mode == DAC_CH_TOPS_R);
+}
+
+// DAC 1 – Verarbeitung (Kanal-Belegung per config.h: DAC1_L_MODE / DAC1_R_MODE)
+size_t process_dac1(uint8_t *data, size_t len) {
+    // Rohsignal für process_dac2 sichern – vor der In-Place-Modifikation
+    s_raw_len = (len <= sizeof(s_raw_buf)) ? len : sizeof(s_raw_buf);
+    memcpy(s_raw_buf, data, s_raw_len);
+
+    int16_t *samples = (int16_t*)data;
+    for (int i = 0; i < (int)(len / 2); i += 2) {
+        float raw_l = (float)samples[i];
+        float raw_r = (float)samples[i + 1];
+
+        float l = compute_ch(DAC1_L_MODE, raw_l, raw_r);
+        float r = compute_ch(DAC1_R_MODE, raw_l, raw_r);
+
+        // Delay-Line DAC 1 (Synchronisation mit Sub/Horn)
+        dac1_dly_L[dac1_dly_idx] = l;
+        dac1_dly_R[dac1_dly_idx] = r;
+        int rd = dac1_dly_idx - tops_delay_samples;
         if (rd < 0) rd += TOPS_DELAY_MAX;
-        l = tops_dly_L[rd];
-        r = tops_dly_R[rd];
-        tops_dly_idx = (tops_dly_idx + 1) % TOPS_DELAY_MAX;
+        if (ch_uses_delay(DAC1_L_MODE)) l = dac1_dly_L[rd];
+        if (ch_uses_delay(DAC1_R_MODE)) r = dac1_dly_R[rd];
+        dac1_dly_idx = (dac1_dly_idx + 1) % TOPS_DELAY_MAX;
 
-        // Limiter: gemeinsamer Gain aus der lauteren Kanalspitze (erhält Stereobild)
+        // Limiter DAC 1
         float g = lim_tops.compute(fmaxf(fabsf(l), fabsf(r)));
         l *= g;
         r *= g;
 
-        // Werte begrenzen (Clipping-Schutz als letzte Reserve)
         samples[i]     = (int16_t)constrain(l, -32768, 32767);
         samples[i + 1] = (int16_t)constrain(r, -32768, 32767);
     }
     return len;
 }
 
-// Audio-Verarbeitung für den Subwoofer (DAC 2) inkl. Lautstärkeregelung
-size_t process_sub(uint8_t *data, size_t len) {
-    int16_t *samples = (int16_t*) data;
-    for (int i = 0; i < len / 2; i += 2) {
-        // Sub = MONO: beide Eingangskanäle zu einem Signal mischen (0,5·(L+R)
-        // gegen Clipping), dann gemeinsam filtern und auf beide DAC-Kanäle legen.
-        float mono_in = 0.5f * ((float)samples[i] + (float)samples[i + 1]);
-        float raw = sub_sub_L2.process(sub_sub_L.process(mono_in));
-        float m = sub_lp_L2.process(sub_lp_L.process(raw)) * vol_sub;
+// DAC 2 – Verarbeitung (Kanal-Belegung per config.h: DAC2_L_MODE / DAC2_R_MODE)
+size_t process_dac2(uint8_t *data, size_t len) {
+    // Rohsignal aus dem gesicherten Puffer lesen (unmodifiziert durch process_dac1)
+    const int16_t *raw = (s_raw_len >= len) ? s_raw_buf : (const int16_t*)data;
 
-        // Limiter zum Schutz des Horns/Subs vor Übersteuerung
-        m *= lim_sub.compute(fabsf(m));
+    int16_t *samples = (int16_t*)data;
+    for (int i = 0; i < (int)(len / 2); i += 2) {
+        float raw_l = (float)raw[i];
+        float raw_r = (float)raw[i + 1];
 
-        int16_t out = (int16_t)constrain(m, -32768, 32767);
-        samples[i]     = out;
-        samples[i + 1] = out;
+        float l = compute_ch(DAC2_L_MODE, raw_l, raw_r);
+        float r = compute_ch(DAC2_R_MODE, raw_l, raw_r);
+
+        // Delay-Line DAC 2 (eigener Ringpuffer, unabhängig von DAC 1)
+        dac2_dly_L[dac2_dly_idx] = l;
+        dac2_dly_R[dac2_dly_idx] = r;
+        int rd = dac2_dly_idx - tops_delay_samples;
+        if (rd < 0) rd += TOPS_DELAY_MAX;
+        if (ch_uses_delay(DAC2_L_MODE)) l = dac2_dly_L[rd];
+        if (ch_uses_delay(DAC2_R_MODE)) r = dac2_dly_R[rd];
+        dac2_dly_idx = (dac2_dly_idx + 1) % TOPS_DELAY_MAX;
+
+        // Limiter DAC 2
+        float g = lim_sub.compute(fmaxf(fabsf(l), fabsf(r)));
+        l *= g;
+        r *= g;
+
+        samples[i]     = (int16_t)constrain(l, -32768, 32767);
+        samples[i + 1] = (int16_t)constrain(r, -32768, 32767);
     }
     return len;
 }
@@ -417,8 +477,8 @@ void setup() {
     i2s_tops  = new I2SStream();
     i2s_sub   = new I2SStream();
     multi_out = new MultiOutput();
-    cb_tops   = new CallbackStream(*i2s_tops, process_tops);
-    cb_sub    = new CallbackStream(*i2s_sub,  process_sub);
+    cb_tops   = new CallbackStream(*i2s_tops, process_dac1);
+    cb_sub    = new CallbackStream(*i2s_sub,  process_dac2);
     a2dp_sink = new BluetoothA2DPSink(*multi_out);
 
     // Limiter konfigurieren (Threshold ~ -0,2 dBFS Headroom).

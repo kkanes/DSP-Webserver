@@ -1,12 +1,19 @@
 #include "AudioTools.h"
 #include "BluetoothA2DPSink.h"
+#include <BluetoothSerial.h>
+#include "config.h"   // Zentrale Konfiguration (Pins, WebGUI-Schalter, Defaults)
+#if !ENABLE_DAC2
+#include "driver/i2s.h"
+#endif
+#if ENABLE_WEBGUI
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include "esp_coexist.h"
-#include "config.h"   // Zentrale Konfiguration (Pins, WebGUI-Schalter, Defaults)
+#endif
 #include "sounds.h"   // Optionale Sprach-/Audio-Clips (WAV im Flash)
 
+#if ENABLE_WEBGUI
 const char* ap_ssid = AP_SSID;
 const char* ap_password = AP_PASSWORD;
 
@@ -24,14 +31,22 @@ WebServer server(80);
 // Sound) und spart Strom. Wird bei jedem Webzugriff zurückgesetzt.
 const unsigned long WIFI_TIMEOUT_MS = (unsigned long)WIFI_TIMEOUT_SEC * 1000UL;
 unsigned long last_web_activity = 0;
-bool wifi_active = (ENABLE_WEBGUI != 0);   // WiFi/AP/Webserver nur wenn WebGUI aktiv
-bool bt_started = false;                    // Bluetooth erst nach WiFi-Timeout starten
 volatile bool bt_switch_requested = false;  // GUI-Button: sofort auf BT wechseln
+#endif
+
+bool bt_started = false;                    // Bluetooth erst nach WiFi-Timeout starten
 
 // Koppel-/Entkoppel-Sound: wird in der BT-Callback nur als Flag gesetzt und
 // im loop() abgespielt (nicht im Callback-Kontext, das wäre unsicher).
 // 0 = nichts, 1 = verbunden (Koppel), 2 = getrennt (Entkoppel)
 volatile int pending_sound = 0;
+
+#if ENABLE_BT_CONFIG
+// SPP-Konfigurationskanal: empfängt Textbefehle vom Handy
+BluetoothSerial bt_serial;
+static char bt_rx_buf[80];   // Zeilenpuffer (max. 79 Zeichen pro Befehl)
+static uint8_t bt_rx_len = 0;
+#endif
 
 // Audio-Objekte als Pointer – Konstruktoren allozieren Heap,
 // dürfen daher NICHT als globale Objekte initialisiert werden (Static Init Fiasco)
@@ -41,6 +56,12 @@ MultiOutput*        multi_out = nullptr;
 BluetoothA2DPSink*  a2dp_sink = nullptr;
 CallbackStream*     cb_tops   = nullptr;
 CallbackStream*     cb_sub    = nullptr;
+
+#if !ENABLE_DAC2
+// PCM1808-Line-In auf den ehemaligen DAC2-Pins (I2S Port 1, RX)
+static bool pcm1808_ready = false;
+static uint8_t pcm1808_buf[1024];
+#endif
 
 // Globale DSP-Filtervariablen
 float sub_subsonic = DEFAULT_SUB_SUBSONIC;
@@ -65,9 +86,11 @@ volatile int tops_delay_samples = 0;
 static int16_t s_raw_buf[1024];   // 512 Stereo-Frames = 2 KB
 static size_t  s_raw_len = 0;
 
-// Globale Lautstärkefaktoren (0.0 bis 1.0)
-float vol_tops = DEFAULT_VOL_TOPS;
-float vol_sub  = DEFAULT_VOL_SUB;
+// Lautstärke pro Kanal (0.0 bis 1.0) – je DAC-Ausgang einzeln einstellbar
+float vol_dac1_l = DEFAULT_VOL_DAC1_L;  // DAC1 L
+float vol_dac1_r = DEFAULT_VOL_DAC1_R;  // DAC1 R
+float vol_dac2_l = DEFAULT_VOL_DAC2_L;  // DAC2 L
+float vol_dac2_r = DEFAULT_VOL_DAC2_R;  // DAC2 R
 
 // Limiter-Parameter (zur Laufzeit über die Weboberfläche einstellbar).
 // Startwerte + feste Attack-Zeiten kommen aus config.h.
@@ -94,97 +117,69 @@ HighPassFilter<float> tops_hp_R(tops_highpass, sample_rate);
 HighPassFilter<float> tops_hp_L2(tops_highpass, sample_rate);
 HighPassFilter<float> tops_hp_R2(tops_highpass, sample_rate);
 
-// Erweitertes Web-GUI mit Audio- und Lautstärkereglern
+#if ENABLE_WEBGUI
+// Web-GUI: Konfigurationsoberfläche (Captive Portal / WLAN-AP)
 const char HTML_GUI[] = R"rawliteral(
 <!DOCTYPE html><html>
-<head><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>3-Channel DSP Controller</title>
+<head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DSP Weiche</title>
 <style>
-  body { font-family: 'Segoe UI', Arial, sans-serif; text-align: center; background: #121212; color: #fff; padding: 15px; margin: 0; }
-  .container { max-width: 450px; margin: auto; }
-  .card { background: #1e1e1e; padding: 20px; border-radius: 15px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); border-left: 5px solid #00adb5; }
-  .card.tops { border-left-color: #ff5722; }
-  h2 { color: #00adb5; margin-top: 0; font-size: 1.4em; }
-  .card.tops h2 { color: #ff5722; }
-  p { margin: 15px 0 5px 0; font-weight: bold; font-size: 1em; color: #ccc; }
-  .vol-title { color: #ffeb3b !important; }
-  input[type=range] { width: 90%; margin: 10px 0; accent-color: #00adb5; }
-  .card.tops input[type=range] { accent-color: #ff5722; }
-  .val { font-size: 1.2em; font-weight: bold; color: #fff; background: #2a2a2a; display: inline-block; padding: 3px 12px; border-radius: 8px; }
-</style>
-</head>
-<body>
-<div class="container">
-  <h1 style="font-size: 1.6em; margin: 15px 0; color: #eee;">🎛️ 3-Kanal DSP Weiche</h1>
-  
-  <!-- SUBWOOFER CARD -->
-  <div class="card">
-    <h2>MTH-30 Subwoofer</h2>
-    <hr style="border-color:#333;">
-    <p class="vol-title">🔈 Subwoofer Lautstärke</p>
-    <input type="range" id="v_sub" min="0" max="100" value="80" onchange="update('v_sub', this.value)">
-    <div class="val"><span id="v_sub_val">80</span> %</div>
-    
-    <p>Subsonic Filter (Horn-Schutz)</p>
-    <input type="range" id="sub_sb" min="40" max="60" value="42" onchange="update('sub_sb', this.value)">
-    <div class="val"><span id="sub_sb_val">42</span> Hz</div>
-    
-    <p>Low-Pass (Trennfrequenz)</p>
-    <input type="range" id="sub_lp" min="60" max="120" value="80" onchange="update('sub_lp', this.value)">
-    <div class="val"><span id="sub_lp_val">80</span> Hz</div>
+body{font-family:'Segoe UI',Arial,sans-serif;background:#121212;color:#fff;padding:12px;margin:0}
+.container{max-width:500px;margin:auto}
+.card{background:#1e1e1e;padding:16px;border-radius:12px;margin-bottom:16px;border-left:5px solid #00adb5;box-shadow:0 4px 12px rgba(0,0,0,.5)}
+.card.t2{border-left-color:#ff5722}
+h1{font-size:1.4em;text-align:center;color:#eee;margin:8px 0 16px}
+h2{margin:0 0 10px;font-size:1.1em;color:#00adb5}
+.t2 h2{color:#ff5722}
+hr{border:none;border-top:1px solid #333;margin:10px 0}
+.row{display:flex;align-items:center;gap:6px;margin:6px 0}
+.row label{flex:0 0 150px;font-size:.82em;color:#ccc;text-align:left}
+.row input[type=range]{flex:1;accent-color:#00adb5;min-width:0}
+.t2 .row input[type=range]{accent-color:#ff5722}
+.row input[type=number]{width:54px;background:#2a2a2a;border:1px solid #444;border-radius:5px;color:#fff;padding:3px 4px;font-size:.85em;text-align:right;-moz-appearance:textfield}
+.row input[type=number]::-webkit-inner-spin-button{opacity:1}
+.row span{font-size:.78em;color:#888;flex:0 0 20px}
+btn{display:block;width:100%;padding:13px;font-size:1em;font-weight:bold;color:#fff;background:#0055bb;border:none;border-radius:10px;cursor:pointer;margin-top:8px}
+#msg{text-align:center;color:#00adb5;min-height:1.2em;margin-top:6px}
+</style></head>
+<body><div class="container">
+<h1>&#127927; DSP Weiche</h1>
 
-    <p>Limiter Threshold</p>
-    <input type="range" id="lim_s_th" min="50" max="100" value="98" onchange="update('lim_s_th', this.value)">
-    <div class="val"><span id="lim_s_th_val">98</span> %</div>
-
-    <p>Limiter Release</p>
-    <input type="range" id="lim_s_rl" min="20" max="500" value="150" onchange="update('lim_s_rl', this.value)">
-    <div class="val"><span id="lim_s_rl_val">150</span> ms</div>
-  </div>
-
-  <!-- TOPS CARD -->
-  <div class="card tops">
-    <h2>Canton Tops (Stereo)</h2>
-    <hr style="border-color:#333;">
-    <p class="vol-title">🔈 Tops Lautstärke</p>
-    <input type="range" id="v_tops" min="0" max="100" value="80" onchange="update('v_tops', this.value)">
-    <div class="val"><span id="v_tops_val">80</span> %</div>
-    
-    <p>High-Pass (Entlastung)</p>
-    <input type="range" id="tops_hp" min="60" max="150" value="80" onchange="update('tops_hp', this.value)">
-    <div class="val"><span id="tops_hp_val">80</span> Hz</div>
-
-    <p>Delay (Sync zum Sub/Horn)</p>
-    <input type="range" id="t_dly" min="0" max="30" step="0.1" value="0" onchange="update('t_dly', this.value)">
-    <div class="val"><span id="t_dly_val">0</span> ms</div>
-
-    <p>Limiter Threshold</p>
-    <input type="range" id="lim_t_th" min="50" max="100" value="98" onchange="update('lim_t_th', this.value)">
-    <div class="val"><span id="lim_t_th_val">98</span> %</div>
-
-    <p>Limiter Release</p>
-    <input type="range" id="lim_t_rl" min="10" max="500" value="100" onchange="update('lim_t_rl', this.value)">
-    <div class="val"><span id="lim_t_rl_val">100</span> ms</div>
-  </div>
-
-  <button onclick="switchBT()" style="width:100%;padding:15px;font-size:1.1em;font-weight:bold;color:#fff;background:#0066cc;border:none;border-radius:12px;cursor:pointer;box-shadow:0 4px 15px rgba(0,0,0,0.5);">
-    🎧 Auf Bluetooth wechseln (WLAN aus)
-  </button>
-  <p id="bt_msg" style="color:#00adb5;min-height:1.2em;"></p>
+<div class="card">
+<h2>DAC 1 &ndash; Subwoofer / Mono</h2><hr>
+<div class="row"><label>&#128266; Sub Lautst.</label><input type="range" id="v_dac1_l" min="0" max="100" value="80" oninput="sl('v_dac1_l',this.value)"><input type="number" id="v_dac1_l_i" min="0" max="100" value="80" onchange="si('v_dac1_l',this.value)"><span>%</span></div>
+<div class="row"><label>&#128266; Mono Lautst.</label><input type="range" id="v_dac1_r" min="0" max="100" value="20" oninput="sl('v_dac1_r',this.value)"><input type="number" id="v_dac1_r_i" min="0" max="100" value="20" onchange="si('v_dac1_r',this.value)"><span>%</span></div>
+<hr>
+<div class="row"><label>Subsonic (Horn-Schutz)</label><input type="range" id="sub_sb" min="40" max="60" value="42" oninput="sl('sub_sb',this.value)"><input type="number" id="sub_sb_i" min="30" max="60" value="42" onchange="si('sub_sb',this.value)"><span>Hz</span></div>
+<div class="row"><label>Tiefpass (Trennung)</label><input type="range" id="sub_lp" min="60" max="180" value="95" oninput="sl('sub_lp',this.value)"><input type="number" id="sub_lp_i" min="60" max="180" value="95" onchange="si('sub_lp',this.value)"><span>Hz</span></div>
+<hr>
+<div class="row"><label>Limiter Threshold</label><input type="range" id="lim_s_th" min="50" max="100" value="98" oninput="sl('lim_s_th',this.value)"><input type="number" id="lim_s_th_i" min="50" max="100" value="98" onchange="si('lim_s_th',this.value)"><span>%</span></div>
+<div class="row"><label>Limiter Release</label><input type="range" id="lim_s_rl" min="20" max="500" value="150" oninput="sl('lim_s_rl',this.value)"><input type="number" id="lim_s_rl_i" min="20" max="500" value="150" onchange="si('lim_s_rl',this.value)"><span>ms</span></div>
 </div>
 
+<div class="card t2">
+<h2>DAC 2 &ndash; Tops L / R</h2><hr>
+<div class="row"><label>&#128266; Tops L Lautst.</label><input type="range" id="v_dac2_l" min="0" max="100" value="80" oninput="sl('v_dac2_l',this.value)"><input type="number" id="v_dac2_l_i" min="0" max="100" value="80" onchange="si('v_dac2_l',this.value)"><span>%</span></div>
+<div class="row"><label>&#128266; Tops R Lautst.</label><input type="range" id="v_dac2_r" min="0" max="100" value="80" oninput="sl('v_dac2_r',this.value)"><input type="number" id="v_dac2_r_i" min="0" max="100" value="80" onchange="si('v_dac2_r',this.value)"><span>%</span></div>
+<hr>
+<div class="row"><label>Hochpass (Entlastung)</label><input type="range" id="tops_hp" min="60" max="150" value="120" oninput="sl('tops_hp',this.value)"><input type="number" id="tops_hp_i" min="60" max="150" value="120" onchange="si('tops_hp',this.value)"><span>Hz</span></div>
+<div class="row"><label>Delay (Sync zum Sub)</label><input type="range" id="t_dly" min="0" max="30" step="0.1" value="0" oninput="sl('t_dly',this.value)"><input type="number" id="t_dly_i" min="0" max="30" step="0.1" value="0" onchange="si('t_dly',this.value)"><span>ms</span></div>
+<hr>
+<div class="row"><label>Limiter Threshold</label><input type="range" id="lim_t_th" min="50" max="100" value="98" oninput="sl('lim_t_th',this.value)"><input type="number" id="lim_t_th_i" min="50" max="100" value="98" onchange="si('lim_t_th',this.value)"><span>%</span></div>
+<div class="row"><label>Limiter Release</label><input type="range" id="lim_t_rl" min="10" max="500" value="100" oninput="sl('lim_t_rl',this.value)"><input type="number" id="lim_t_rl_i" min="10" max="500" value="100" onchange="si('lim_t_rl',this.value)"><span>ms</span></div>
+</div>
+
+<button class="btn" onclick="switchBT()">&#127911; Auf Bluetooth wechseln (WLAN aus)</button>
+<div id="msg"></div>
+</div>
 <script>
-function update(type, val) {
-  document.getElementById(type + '_val').innerText = val;
-  fetch('/set?' + type + '=' + val);
-}
-function switchBT() {
-  document.getElementById('bt_msg').innerText = 'WLAN wird abgeschaltet, Bluetooth startet...';
-  fetch('/bt');
-}
-</script>
-</body></html>
+function sl(id,v){document.getElementById(id+'_i').value=v;fetch('/set?'+id+'='+v);}
+function si(id,v){var s=document.getElementById(id);v=Math.min(Math.max(parseFloat(v)||0,parseFloat(s.min)),parseFloat(s.max));document.getElementById(id+'_i').value=v;s.value=v;fetch('/set?'+id+'='+v);}
+function switchBT(){document.getElementById('msg').innerText='WLAN wird abgeschaltet, Bluetooth startet...';fetch('/bt');}
+window.onload=function(){fetch('/status').then(function(r){return r.json();}).then(function(d){for(var k in d){var s=document.getElementById(k),i=document.getElementById(k+'_i');if(s)s.value=d[k];if(i)i.value=d[k];}}).catch(function(){});};}
+</script></body></html>
 )rawliteral";
+#endif // ENABLE_WEBGUI
 
 // --- Peak-Limiter ----------------------------------------------------------
 // Sanfter Pegelbegrenzer: senkt die Verstärkung mit Attack/Release, bevor das
@@ -224,14 +219,14 @@ static float compute_ch(int mode, float raw_l, float raw_r) {
         case DAC_CH_SUB: {
             float m = 0.5f * (raw_l + raw_r);
             m = sub_sub_L2.process(sub_sub_L.process(m));
-            return sub_lp_L2.process(sub_lp_L.process(m)) * vol_sub;
+            return sub_lp_L2.process(sub_lp_L.process(m));
         }
         case DAC_CH_MONO:
-            return 0.5f * (raw_l + raw_r) * vol_tops;
+            return 0.5f * (raw_l + raw_r);
         case DAC_CH_TOPS_L:
-            return tops_hp_L2.process(tops_hp_L.process(raw_l)) * vol_tops;
+            return tops_hp_L2.process(tops_hp_L.process(raw_l));
         case DAC_CH_TOPS_R:
-            return tops_hp_R2.process(tops_hp_R.process(raw_r)) * vol_tops;
+            return tops_hp_R2.process(tops_hp_R.process(raw_r));
         case DAC_CH_LEFT:
             return raw_l;
         case DAC_CH_RIGHT:
@@ -258,8 +253,8 @@ size_t process_dac1(uint8_t *data, size_t len) {
         float raw_l = (float)samples[i];
         float raw_r = (float)samples[i + 1];
 
-        float l = compute_ch(DAC1_L_MODE, raw_l, raw_r);
-        float r = compute_ch(DAC1_R_MODE, raw_l, raw_r);
+        float l = compute_ch(DAC1_L_MODE, raw_l, raw_r) * vol_dac1_l;
+        float r = compute_ch(DAC1_R_MODE, raw_l, raw_r) * vol_dac1_r;
 
         // Delay-Line DAC 1 (Synchronisation mit Sub/Horn)
         dac1_dly_L[dac1_dly_idx] = l;
@@ -291,8 +286,8 @@ size_t process_dac2(uint8_t *data, size_t len) {
         float raw_l = (float)raw[i];
         float raw_r = (float)raw[i + 1];
 
-        float l = compute_ch(DAC2_L_MODE, raw_l, raw_r);
-        float r = compute_ch(DAC2_R_MODE, raw_l, raw_r);
+        float l = compute_ch(DAC2_L_MODE, raw_l, raw_r) * vol_dac2_l;
+        float r = compute_ch(DAC2_R_MODE, raw_l, raw_r) * vol_dac2_r;
 
         // Delay-Line DAC 2 (eigener Ringpuffer, unabhängig von DAC 1)
         dac2_dly_L[dac2_dly_idx] = l;
@@ -313,6 +308,68 @@ size_t process_dac2(uint8_t *data, size_t len) {
     }
     return len;
 }
+
+#if !ENABLE_DAC2
+// PCM1808 (Stereo) -> Mono-Summe, danach bestehende DSP-Logik fuer DAC1 nutzen.
+static inline void sum_stereo_to_mono_inplace(uint8_t *data, size_t len) {
+    int16_t *samples = (int16_t*)data;
+    int count = (int)(len / 2);
+    for (int i = 0; i + 1 < count; i += 2) {
+        int32_t m = ((int32_t)samples[i] + (int32_t)samples[i + 1]) / 2;
+        if (m > 32767) m = 32767;
+        if (m < -32768) m = -32768;
+        int16_t mono = (int16_t)m;
+        samples[i] = mono;
+        samples[i + 1] = mono;
+    }
+}
+
+static void setup_pcm1808_input() {
+    i2s_config_t cfg = {};
+    cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX);
+    cfg.sample_rate = SAMPLE_RATE;
+    cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+    cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+    cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+    cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+    cfg.dma_buf_count = 8;
+    cfg.dma_buf_len = 256;
+    cfg.use_apll = false;
+    cfg.tx_desc_auto_clear = false;
+    cfg.fixed_mclk = 0;
+
+    i2s_pin_config_t pins = {};
+    pins.bck_io_num = SUB_PIN_BCK;
+    pins.ws_io_num = SUB_PIN_WS;
+    pins.data_out_num = I2S_PIN_NO_CHANGE;
+    pins.data_in_num = SUB_PIN_DATA;
+
+    if (i2s_driver_install(I2S_NUM_1, &cfg, 0, nullptr) != ESP_OK) {
+        Serial.println("[PCM1808] i2s_driver_install fehlgeschlagen");
+        return;
+    }
+    if (i2s_set_pin(I2S_NUM_1, &pins) != ESP_OK) {
+        Serial.println("[PCM1808] i2s_set_pin fehlgeschlagen");
+        i2s_driver_uninstall(I2S_NUM_1);
+        return;
+    }
+    i2s_zero_dma_buffer(I2S_NUM_1);
+    pcm1808_ready = true;
+    Serial.println("[PCM1808] I2S-Input aktiv (Stereo -> Mono)");
+}
+
+static void service_pcm1808_input() {
+    if (!pcm1808_ready || !i2s_tops) return;
+    size_t bytes_read = 0;
+    esp_err_t err = i2s_read(I2S_NUM_1, pcm1808_buf, sizeof(pcm1808_buf), &bytes_read, 0);
+    if (err != ESP_OK || bytes_read < 4) return;
+
+    // Erst summieren, dann wie gewohnt mit den bestehenden DSP-Einstellungen verarbeiten.
+    sum_stereo_to_mono_inplace(pcm1808_buf, bytes_read);
+    process_dac1(pcm1808_buf, bytes_read);
+    i2s_tops->write(pcm1808_buf, bytes_read);
+}
+#endif
 
 // CallbackStream-Wrapper werden in setup() erstellt (siehe unten)
 
@@ -408,7 +465,7 @@ void play_pcm_mono(const int16_t* data, size_t samples, float amp = SND_VOLUME) 
 // Gemeinsame Parameter-Logik für die Web-Steuerung
 void apply_param(const String& key, float val) {
     if (key == "sub_sb") {
-        if (val >= 40.0) { sub_subsonic = val; sub_sub_L.begin(val, sample_rate); sub_sub_R.begin(val, sample_rate); sub_sub_L2.begin(val, sample_rate); sub_sub_R2.begin(val, sample_rate); }
+        if (val >= 30.0) { sub_subsonic = val; sub_sub_L.begin(val, sample_rate); sub_sub_R.begin(val, sample_rate); sub_sub_L2.begin(val, sample_rate); sub_sub_R2.begin(val, sample_rate); }
     } else if (key == "sub_lp") {
         sub_lowpass = val;
         sub_lp_L.begin(sub_lowpass, sample_rate); sub_lp_R.begin(sub_lowpass, sample_rate);
@@ -423,10 +480,20 @@ void apply_param(const String& key, float val) {
         if (s < 0) s = 0;
         if (s > TOPS_DELAY_MAX - 1) s = TOPS_DELAY_MAX - 1;
         tops_delay_samples = s;
-    } else if (key == "v_tops") {
-        vol_tops = val / 100.0;
-    } else if (key == "v_sub") {
-        vol_sub = val / 100.0;
+    } else if (key == "v_dac1_l") {
+        vol_dac1_l = val / 100.0f;
+    } else if (key == "v_dac1_r") {
+        vol_dac1_r = val / 100.0f;
+    } else if (key == "v_dac2_l") {
+        vol_dac2_l = val / 100.0f;
+    } else if (key == "v_dac2_r") {
+        vol_dac2_r = val / 100.0f;
+    } else if (key == "v_tops") {   // Alias: alle Nicht-Sub-Kanäle gemeinsam
+        vol_dac1_r = val / 100.0f;
+        vol_dac2_l = val / 100.0f;
+        vol_dac2_r = val / 100.0f;
+    } else if (key == "v_sub") {    // Alias: Sub-Kanal (DAC1 L)
+        vol_dac1_l = val / 100.0f;
     } else if (key == "lim_s_th") {
         // Threshold in % der Vollaussteuerung (50..100) -> Sample-Wert
         lim_sub_thresh = val / 100.0f * 32767.0f;
@@ -444,50 +511,93 @@ void apply_param(const String& key, float val) {
     Serial.printf("[SET] %s = %.1f\n", key.c_str(), val);
 }
 
+#if ENABLE_WEBGUI
+// Liefert alle aktuellen DSP-Parameter als JSON (wird beim Seitenload abgerufen)
+void handle_status() {
+    last_web_activity = millis();
+    char buf[320];
+    snprintf(buf, sizeof(buf),
+        "{\"sub_sb\":%.1f,\"sub_lp\":%.1f,\"tops_hp\":%.1f,\"t_dly\":%.1f,"
+        "\"v_dac1_l\":%.0f,\"v_dac1_r\":%.0f,\"v_dac2_l\":%.0f,\"v_dac2_r\":%.0f,"
+        "\"lim_s_th\":%.0f,\"lim_s_rl\":%.0f,\"lim_t_th\":%.0f,\"lim_t_rl\":%.0f}",
+        sub_subsonic, sub_lowpass, tops_highpass, tops_delay_ms,
+        vol_dac1_l * 100.0f, vol_dac1_r * 100.0f,
+        vol_dac2_l * 100.0f, vol_dac2_r * 100.0f,
+        lim_sub_thresh  / 32767.0f * 100.0f, lim_sub_rel,
+        lim_tops_thresh / 32767.0f * 100.0f, lim_tops_rel);
+    server.send(200, "application/json", buf);
+}
+
 void handle_update() {
     last_web_activity = millis();
-    if (server.hasArg("sub_sb")) apply_param("sub_sb", server.arg("sub_sb").toFloat());
-    if (server.hasArg("sub_lp")) apply_param("sub_lp", server.arg("sub_lp").toFloat());
-    if (server.hasArg("tops_hp")) apply_param("tops_hp", server.arg("tops_hp").toFloat());
-    if (server.hasArg("t_dly")) apply_param("t_dly", server.arg("t_dly").toFloat());
-    if (server.hasArg("v_tops")) apply_param("v_tops", server.arg("v_tops").toFloat());
-    if (server.hasArg("v_sub")) apply_param("v_sub", server.arg("v_sub").toFloat());
-    if (server.hasArg("lim_s_th")) apply_param("lim_s_th", server.arg("lim_s_th").toFloat());
-    if (server.hasArg("lim_s_rl")) apply_param("lim_s_rl", server.arg("lim_s_rl").toFloat());
-    if (server.hasArg("lim_t_th")) apply_param("lim_t_th", server.arg("lim_t_th").toFloat());
-    if (server.hasArg("lim_t_rl")) apply_param("lim_t_rl", server.arg("lim_t_rl").toFloat());
+    const char* keys[] = {
+        "sub_sb","sub_lp","tops_hp","t_dly",
+        "v_dac1_l","v_dac1_r","v_dac2_l","v_dac2_r",
+        "v_tops","v_sub",
+        "lim_s_th","lim_s_rl","lim_t_th","lim_t_rl"
+    };
+    for (auto k : keys)
+        if (server.hasArg(k)) apply_param(k, server.arg(k).toFloat());
     server.send(200, "text/plain", "OK");
 }
+#endif // ENABLE_WEBGUI
 
 // Bluetooth-A2DP starten (einmalig). Wird entweder direkt beim Boot aufgerufen
 // (WebGUI aus) oder erst nach dem WiFi-Timeout (WebGUI an), damit WLAN und BT
 // nie gleichzeitig Speicher belegen.
 void start_bluetooth() {
+#if !ENABLE_DAC2
+    // PCM1808-Line-In-Modus nutzt keinen A2DP-Stream als Quelle.
+    return;
+#else
     if (bt_started) return;
     Serial.println("Starting Bluetooth...");
     a2dp_sink->start(BT_DEVICE_NAME);
     bt_started = true;
+#if ENABLE_BT_CONFIG
+    // SPP nach A2DP starten – der BT-Stack läuft bereits, bt_serial hängt sich
+    // als zusätzliches Profil ein (kein erneutes esp_bluedroid_init).
+    bt_serial.begin(BT_DEVICE_NAME);
+    Serial.println("BT-Config (SPP) aktiv - App: 'Serial Bluetooth Terminal'");
+#endif
     Serial.println("Bluetooth started");
+#endif
 }
 
 void setup() {
     Serial.begin(115200);
+    delay(200); // UART settle
+    Serial.printf("\n\n=== SETUP START  free heap: %lu ===\n", (unsigned long)ESP.getFreeHeap());
 
     // Audio-Objekte hier auf dem Heap erzeugen (Heap ist jetzt initialisiert)
+    Serial.println("[1] new I2SStream tops");
     i2s_tops  = new I2SStream();
+#if ENABLE_DAC2
+    Serial.println("[2] new I2SStream sub");
     i2s_sub   = new I2SStream();
+#endif
+    Serial.println("[3] new MultiOutput");
     multi_out = new MultiOutput();
+    Serial.println("[4] new CallbackStream tops");
     cb_tops   = new CallbackStream(*i2s_tops, process_dac1);
+#if ENABLE_DAC2
+    Serial.println("[5] new CallbackStream sub");
     cb_sub    = new CallbackStream(*i2s_sub,  process_dac2);
+#endif
+#if ENABLE_DAC2
+    Serial.printf("[6] new BluetoothA2DPSink  free heap: %lu\n", (unsigned long)ESP.getFreeHeap());
     a2dp_sink = new BluetoothA2DPSink(*multi_out);
+#else
+    Serial.printf("[6] PCM1808-LineIn-Modus  free heap: %lu\n", (unsigned long)ESP.getFreeHeap());
+#endif
 
     // Limiter konfigurieren (Threshold ~ -0,2 dBFS Headroom).
-    // Tops: schneller Attack, mittlerer Release. Sub: etwas trägere Zeiten,
-    // damit tiefe Bässe nicht "pumpen".
+    Serial.println("[7] limiter begin");
     lim_tops.begin(lim_tops_thresh, sample_rate, LIM_TOPS_ATTACK_MS, lim_tops_rel);
     lim_sub.begin(lim_sub_thresh,  sample_rate, LIM_SUB_ATTACK_MS,  lim_sub_rel);
 
     // DAC 1 Pins (Canton Tops)
+    Serial.println("[8] i2s_tops begin");
     auto config_tops = i2s_tops->defaultConfig();
     config_tops.port_no    = 0;
     config_tops.sample_rate = 44100;
@@ -499,8 +609,12 @@ void setup() {
     config_tops.buffer_count = 8;
     config_tops.buffer_size  = 512;
     i2s_tops->begin(config_tops);
+    Serial.println("[8] i2s_tops OK");
 
-    // DAC 2 Pins (MTH-30 Sub)
+#if ENABLE_DAC2
+    // DAC 2 Pins (MTH-30 Sub) – bei ENABLE_DAC2 0 bleiben diese Pins frei
+    // (z.B. fuer PCM1808 ADC-Eingang; Konfiguration als I2S-Input separat noetig)
+    Serial.println("[9] i2s_sub begin");
     auto config_sub = i2s_sub->defaultConfig();
     config_sub.port_no    = 1;
     config_sub.sample_rate = 44100;
@@ -510,10 +624,18 @@ void setup() {
     config_sub.buffer_count = 8;
     config_sub.buffer_size  = 512;
     i2s_sub->begin(config_sub);
+    Serial.println("[9] i2s_sub OK");
+#else
+    Serial.println("[9] setup PCM1808 input");
+    setup_pcm1808_input();
+#endif
 
     multi_out->add(*cb_tops);
+#if ENABLE_DAC2
     multi_out->add(*cb_sub);
+#endif
 
+#if ENABLE_DAC2
     // Verbindungs-Callback zum Debuggen
     a2dp_sink->set_on_connection_state_changed([](esp_a2d_connection_state_t state, void* ptr){
         Serial.printf("[BT] Connection state: %d (2=connected)\n", state);
@@ -523,6 +645,7 @@ void setup() {
     a2dp_sink->set_on_audio_state_changed([](esp_a2d_audio_state_t state, void* ptr){
         Serial.printf("[BT] Audio state: %d (1=started)\n", state);
     });
+#endif
 
     // Betriebsmodus:
     //  - ENABLE_WEBGUI = 0: Bluetooth startet sofort (kein WLAN).
@@ -590,6 +713,7 @@ void setup() {
 
     server.on("/", send_gui);
     server.on("/set", handle_update);
+    server.on("/status", handle_status);
 
     // GUI-Button "Auf Bluetooth wechseln": Antwort sofort senden, das eigentliche
     // Abschalten passiert im loop() (Server darf nicht mitten im Request sterben).
@@ -615,6 +739,7 @@ void setup() {
 }
 
 // WiFi-AP + Webserver + DNS abschalten (Inaktivitäts-Timeout), dann Bluetooth an
+#if ENABLE_WEBGUI
 void shutdown_wifi() {
     Serial.println("WiFi-Timeout: AP + Webserver werden abgeschaltet");
     server.stop();
@@ -626,6 +751,85 @@ void shutdown_wifi() {
     // Jetzt ist der WLAN-Speicher frei -> Bluetooth kann sauber starten
     start_bluetooth();
 }
+#endif
+
+#if ENABLE_BT_CONFIG
+// Eingehende SPP-Zeichen verarbeiten (zeilenweise Befehle).
+// Wird im loop() aufgerufen, blockiert nicht.
+void handle_bt_serial() {
+    while (bt_serial.available()) {
+        char c = (char)bt_serial.read();
+        if (c == '\n' || c == '\r') {
+            if (bt_rx_len == 0) continue;
+            bt_rx_buf[bt_rx_len] = '\0';
+            bt_rx_len = 0;
+            String line(bt_rx_buf);
+            line.trim();
+            if (line == "status" || line == "?") {
+                // Maschinenlesbares Format: key=wert, eine Zeile je Parameter.
+                // Wird von der App Inventor App beim Verbinden geparst.
+                bt_serial.printf(
+                    "sub_sb=%.1f\r\nsub_lp=%.1f\r\ntops_hp=%.1f\r\nt_dly=%.1f\r\n"
+                    "v_dac1_l=%.0f\r\nv_dac1_r=%.0f\r\nv_dac2_l=%.0f\r\nv_dac2_r=%.0f\r\n"
+                    "lim_s_th=%.0f\r\nlim_s_rl=%.0f\r\nlim_t_th=%.0f\r\nlim_t_rl=%.0f\r\n"
+                    "END\r\n",
+                    sub_subsonic, sub_lowpass, tops_highpass, tops_delay_ms,
+                    vol_dac1_l * 100.0f, vol_dac1_r * 100.0f,
+                    vol_dac2_l * 100.0f, vol_dac2_r * 100.0f,
+                    lim_sub_thresh  / 32767.0f * 100.0f, lim_sub_rel,
+                    lim_tops_thresh / 32767.0f * 100.0f, lim_tops_rel);
+            } else if (line == "reset") {
+                // Alle Parameter auf die in config.h definierten Standardwerte zurücksetzen.
+                // apply_param() wird genutzt damit Filter/Limiter korrekt neu initialisiert werden.
+                apply_param("sub_sb",   DEFAULT_SUB_SUBSONIC);
+                apply_param("sub_lp",   DEFAULT_SUB_LOWPASS);
+                apply_param("tops_hp",  DEFAULT_TOPS_HIGHPASS);
+                apply_param("t_dly",    DEFAULT_TOPS_DELAY_MS);
+                apply_param("v_dac1_l", DEFAULT_VOL_DAC1_L * 100.0f);
+                apply_param("v_dac1_r", DEFAULT_VOL_DAC1_R * 100.0f);
+                apply_param("v_dac2_l", DEFAULT_VOL_DAC2_L * 100.0f);
+                apply_param("v_dac2_r", DEFAULT_VOL_DAC2_R * 100.0f);
+                apply_param("lim_s_th", DEFAULT_LIM_SUB_THRESH  / 32767.0f * 100.0f);
+                apply_param("lim_s_rl", DEFAULT_LIM_SUB_REL);
+                apply_param("lim_t_th", DEFAULT_LIM_TOPS_THRESH / 32767.0f * 100.0f);
+                apply_param("lim_t_rl", DEFAULT_LIM_TOPS_REL);
+                bt_serial.print("OK reset – alle Standardwerte wiederhergestellt\r\n");
+            } else if (line == "help") {
+                bt_serial.print(
+                    "-- Befehle --\r\n"
+                    "key=wert     Parameter setzen\r\n"
+                    "status / ?   Alle Werte anzeigen\r\n"
+                    "reset        Alle Standardwerte aus config.h wiederherstellen\r\n"
+                    "-- Parameter --\r\n"
+                    "sub_sb       Subsonic Hz (30-60)\r\n"
+                    "sub_lp       Sub-Tiefpass Hz (60-180)\r\n"
+                    "tops_hp      Tops-Hochpass Hz (60-150)\r\n"
+                    "t_dly        Tops-Delay ms (0-30)\r\n"
+                    "v_dac1_l     DAC1 L Lautst. % (Sub)\r\n"
+                    "v_dac1_r     DAC1 R Lautst. % (Mono)\r\n"
+                    "v_dac2_l     DAC2 L Lautst. % (Tops L)\r\n"
+                    "v_dac2_r     DAC2 R Lautst. % (Tops R)\r\n"
+                    "lim_s_th     Sub Limiter Threshold %\r\n"
+                    "lim_s_rl     Sub Limiter Release ms\r\n"
+                    "lim_t_th     Tops Limiter Threshold %\r\n"
+                    "lim_t_rl     Tops Limiter Release ms\r\n");
+            } else {
+                int eq = line.indexOf('=');
+                if (eq > 0) {
+                    String key = line.substring(0, eq);
+                    float  val = line.substring(eq + 1).toFloat();
+                    apply_param(key, val);
+                    bt_serial.printf("OK %s=%.2f\r\n", key.c_str(), val);
+                } else {
+                    bt_serial.print("ERR Unbekannt. 'help' fuer Befehlsliste.\r\n");
+                }
+            }
+        } else if (bt_rx_len < (uint8_t)(sizeof(bt_rx_buf) - 1)) {
+            bt_rx_buf[bt_rx_len++] = c;
+        }
+    }
+}
+#endif
 
 void loop() {
     if (pending_sound) {
@@ -642,6 +846,11 @@ void loop() {
         else if (s == 2) play_disconnect_sound();
 #endif
     }
+#if ENABLE_BT_CONFIG
+    if (bt_started) handle_bt_serial();
+#endif
+#if ENABLE_WEBGUI
+    static bool wifi_active = true;
     if (wifi_active) {
         dnsServer.processNextRequest();
         server.handleClient();
@@ -653,4 +862,9 @@ void loop() {
             shutdown_wifi();
         }
     }
+#endif
+
+#if !ENABLE_DAC2
+    service_pcm1808_input();
+#endif
 }

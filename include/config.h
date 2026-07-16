@@ -14,6 +14,16 @@
 // --- Bluetooth -------------------------------------------------------
 #define BT_DEVICE_NAME         "Kevaier-Audio"
 
+// --- Bluetooth-Konfiguration per SPP ---------------------------------
+// 1 = Einstellungen per Classic-BT-Serial (SPP) vom Handy aus ändern.
+// Passende App: "Serial Bluetooth Terminal" (Android, kostenlos).
+// Verbinden mit "Kevaier-Audio", dann Befehle senden:
+//   key=wert     z.B.  v_dac1_l=75   oder   sub_lp=90
+//   status       alle aktuellen Werte ausgeben
+//   help         Befehlsliste anzeigen
+// Hinweis: läuft gleichzeitig mit A2DP auf demselben BT-Chip.
+#define ENABLE_BT_CONFIG       1
+
 // --- Audio-Basis -----------------------------------------------------
 #define SAMPLE_RATE            44100
 
@@ -22,22 +32,35 @@
 #define TOPS_PIN_WS            27
 #define TOPS_PIN_DATA          22
 
-// --- DAC 2 (MTH-30 Sub) Pins ----------------------------------------
+// --- DAC 2 / PCM1808 Pins -------------------------------------------
+// Bei ENABLE_DAC2=1: I2S-Ausgang fuer DAC2 (z.B. Tops/Sub je nach Routing)
+// Bei ENABLE_DAC2=0: I2S-Eingang vom PCM1808 (Stereo Line-In)
 #define SUB_PIN_BCK            21
 #define SUB_PIN_WS             17
 #define SUB_PIN_DATA           16
 
+// --- DAC 2 aktivieren ------------------------------------------------
+// 1 = DAC 2 (SUB_PIN_*) aktiv als I2S-Ausgang  (PCM5102 o.ä.)
+// 0 = DAC 2 deaktiviert, stattdessen PCM1808-Line-In auf SUB_PIN_*.
+//     Das PCM1808-Stereo-Signal wird zu Mono summiert und mit den
+//     vorhandenen DSP-Einstellungen weiterverarbeitet.
+#define ENABLE_DAC2            0
+
 // --- Crossover-Filter (Startwerte, per WebGUI zur Laufzeit änderbar) --
-#define DEFAULT_SUB_SUBSONIC   42.0f    // Hz  Subsonic-Hochpass (Horn-Schutz)
+#define DEFAULT_SUB_SUBSONIC   43.0f    // Hz  Subsonic-Hochpass (Horn-Schutz)
 #define DEFAULT_SUB_LOWPASS    95.0f    // Hz  Sub-Tiefpass (Trennfrequenz)
-#define DEFAULT_TOPS_HIGHPASS  120.0f   // Hz  Tops-Hochpass
+#define DEFAULT_TOPS_HIGHPASS  95.0f   // Hz  Tops-Hochpass
 
 // --- Tops-Delay (Synchronisation zum Sub/Horn) -----------------------
 #define DEFAULT_TOPS_DELAY_MS  0.0f     // ms
 
-// --- Lautstärke (0.0 .. 1.0) ----------------------------------------
-#define DEFAULT_VOL_TOPS       0.8f
-#define DEFAULT_VOL_SUB        0.8f
+// --- Lautstärke pro Kanal (0.0 .. 1.0) ------------------------------
+// Jeder der vier DAC-Ausgänge hat einen eigenen Lautstärkewert.
+// Zur Laufzeit per WebGUI oder apply_param() änderbar.
+#define DEFAULT_VOL_DAC1_L     0.2f    // DAC1 L  (aktuell: Subwoofer)
+#define DEFAULT_VOL_DAC1_R     0.2f    // DAC1 R  (aktuell: Stereo-Mono)
+#define DEFAULT_VOL_DAC2_L     0.8f    // DAC2 L  (aktuell: Tops L)
+#define DEFAULT_VOL_DAC2_R     0.8f    // DAC2 R  (aktuell: Tops R)
 
 // --- Koppel-/Entkoppel-Ton ------------------------------------------
 // Lautstärke der Signaltöne (0.0 .. 1.0). Klein halten, damit der Ton beim

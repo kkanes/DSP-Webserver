@@ -33,7 +33,7 @@
 // Menue-Dokumentation: siehe include/menu_visualization.h
 #define ENABLE_OLED_MENU       1
 
-// OLED (SSD1306 128x64, I2C)
+// OLED (SH1106 128x64, I2C) -- Hersteller-Aufdruck lautet "SH1306" (Tippfehler)
 #define OLED_I2C_ADDR          0x3C
 #define OLED_PIN_SDA           32
 #define OLED_PIN_SCL           33

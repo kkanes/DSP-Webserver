@@ -698,7 +698,7 @@ void apply_param(const String& key, float val, bool persist_as_user) {
 }
 
 #if ENABLE_OLED_MENU
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
+U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 
 struct MenuItem {
     const char* key;
@@ -891,7 +891,17 @@ static void setup_oled_menu() {
     enc_prev = (a << 1) | b;
 
     Wire.begin(OLED_PIN_SDA, OLED_PIN_SCL);
-    oled.setI2CAddress((uint8_t)(OLED_I2C_ADDR << 1));
+
+    // Scan for SH1106 at 0x3C or 0x3D and use whichever responds
+    uint8_t found_addr = OLED_I2C_ADDR;
+    static const uint8_t candidates[] = {0x3C, 0x3D};
+    for (uint8_t addr : candidates) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) { found_addr = addr; break; }
+    }
+    Serial.printf("[MENU] OLED I2C scan: using 0x%02X\n", found_addr);
+
+    oled.setI2CAddress((uint8_t)(found_addr << 1));
     oled.begin();
     oled.setPowerSave(0);
     oled.setContrast(OLED_ACTIVE_CONTRAST);

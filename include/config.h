@@ -34,9 +34,9 @@
 #define ENABLE_OLED_MENU       1
 
 // OLED (SH1106 128x64, I2C) -- Hersteller-Aufdruck lautet "SH1306" (Tippfehler)
-#define OLED_I2C_ADDR          0x3C
-#define OLED_PIN_SDA           32
-#define OLED_PIN_SCL           33
+#define OLED_I2C_ADDR          0x3D
+#define OLED_PIN_SDA           18
+#define OLED_PIN_SCL           19
 
 // Rotary-Encoder (HC11): A/B fuer Drehung
 #define ROTARY_PIN_A           25
@@ -56,10 +56,10 @@
 #define MENU_BUTTON_ACTIVE_LOW 1
 
 // OLED schlaeft nach Inaktivitaet ein (Sekunden). Drehung/Tastendruck weckt.
-#define OLED_SLEEP_TIMEOUT_SEC 30
+#define OLED_SLEEP_TIMEOUT_SEC 3600
 
 // Vor dem Sleep erst dimmen (Sekunden ohne Eingabe)
-#define OLED_DIM_TIMEOUT_SEC   20
+#define OLED_DIM_TIMEOUT_SEC   3600
 #define OLED_ACTIVE_CONTRAST   255
 #define OLED_DIM_CONTRAST      24
 
@@ -77,15 +77,15 @@
 #define PROFILE_USER           2
 
 // Welches Profil nach erstem Flashen bzw. ohne NVS-Daten aktiv sein soll
-#define DEFAULT_PROFILE_ID     PROFILE_MTH30_TOP
+#define DEFAULT_PROFILE_ID     PROFILE_Z2300_SAT
 
 // Preset: MTH30 + TOP
 #define P_MTH30_SUB_SB         43.0f
 #define P_MTH30_SUB_LP         95.0f
 #define P_MTH30_TOPS_HP        95.0f
 #define P_MTH30_T_DLY          0.0f
-#define P_MTH30_V_DAC1_L       20.0f
-#define P_MTH30_V_DAC1_R       20.0f
+#define P_MTH30_V_DAC1_L       80.0f
+#define P_MTH30_V_DAC1_R       80.0f
 #define P_MTH30_V_DAC2_L       80.0f
 #define P_MTH30_V_DAC2_R       80.0f
 #define P_MTH30_LIM_S_TH       98.0f
@@ -96,11 +96,11 @@
 
 // Preset: Z2300 + SAT
 #define P_Z2300_SUB_SB         35.0f
-#define P_Z2300_SUB_LP         140.0f
-#define P_Z2300_TOPS_HP        140.0f
+#define P_Z2300_SUB_LP         100.0f
+#define P_Z2300_TOPS_HP        100.0f
 #define P_Z2300_T_DLY          0.0f
-#define P_Z2300_V_DAC1_L       30.0f
-#define P_Z2300_V_DAC1_R       25.0f
+#define P_Z2300_V_DAC1_L       80.0f
+#define P_Z2300_V_DAC1_R       80.0f
 #define P_Z2300_V_DAC2_L       60.0f
 #define P_Z2300_V_DAC2_R       60.0f
 #define P_Z2300_LIM_S_TH       92.0f
@@ -135,8 +135,8 @@
 
 // Schwellwerte fuer AUX-Signalerkennung (Hysterese, 16-bit Peak)
 // ON: ab diesem Peak wird AUX aktiv. OFF: unter diesem Peak kann AUX auslaufen.
-#define AUX_ACTIVITY_ON_THRESHOLD   700
-#define AUX_ACTIVITY_OFF_THRESHOLD  350
+#define AUX_ACTIVITY_ON_THRESHOLD   8000
+#define AUX_ACTIVITY_OFF_THRESHOLD  4000
 
 // Haltezeit fuer AUX-Prioritaet nach letztem erkannten Signal (ms)
 #define AUX_PRIORITY_HOLD_MS    1200

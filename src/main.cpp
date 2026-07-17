@@ -69,6 +69,7 @@ static int32_t pcm1808_rx32[512];
 static int16_t pcm1808_mix16[512];
 #if ENABLE_BT_FALLBACK_WITH_AUX
 static volatile bool aux_priority_active = false;
+static volatile bool bt_connected = false;
 static uint32_t aux_last_signal_ms = 0;
 static float aux_mix = 0.0f; // 0 = nur BT, 1 = nur AUX
 #endif
@@ -422,7 +423,9 @@ static void service_pcm1808_input() {
 
 #if ENABLE_BT_FALLBACK_WITH_AUX
     uint32_t now = millis();
-    if (peak >= AUX_ACTIVITY_ON_THRESHOLD) {
+    if (bt_connected) {
+        aux_priority_active = false;
+    } else if (peak >= AUX_ACTIVITY_ON_THRESHOLD) {
         aux_last_signal_ms = now;
         aux_priority_active = true;
     } else if (peak <= AUX_ACTIVITY_OFF_THRESHOLD && (now - aux_last_signal_ms) > (unsigned long)AUX_PRIORITY_HOLD_MS) {
@@ -892,14 +895,24 @@ static void setup_oled_menu() {
 
     Wire.begin(OLED_PIN_SDA, OLED_PIN_SCL);
 
-    // Scan for SH1106 at 0x3C or 0x3D and use whichever responds
-    uint8_t found_addr = OLED_I2C_ADDR;
-    static const uint8_t candidates[] = {0x3C, 0x3D};
-    for (uint8_t addr : candidates) {
+    // Full I2C bus scan - print every device that responds
+    Serial.printf("[MENU] I2C Scan auf SDA=GPIO%d SCL=GPIO%d ...\n", OLED_PIN_SDA, OLED_PIN_SCL);
+    uint8_t found_addr = 0;
+    int found_count = 0;
+    for (uint8_t addr = 1; addr < 127; addr++) {
         Wire.beginTransmission(addr);
-        if (Wire.endTransmission() == 0) { found_addr = addr; break; }
+        if (Wire.endTransmission() == 0) {
+            Serial.printf("[MENU] I2C Geraet gefunden: 0x%02X\n", addr);
+            if (!found_addr) found_addr = addr;
+            found_count++;
+        }
     }
-    Serial.printf("[MENU] OLED I2C scan: using 0x%02X\n", found_addr);
+    if (found_count == 0) {
+        Serial.println("[MENU] KEIN I2C Geraet gefunden! Verkabelung pruefen.");
+        found_addr = OLED_I2C_ADDR;
+    } else {
+        Serial.printf("[MENU] Verwende OLED auf 0x%02X\n", found_addr);
+    }
 
     oled.setI2CAddress((uint8_t)(found_addr << 1));
     oled.begin();
@@ -1126,8 +1139,18 @@ void setup() {
     // Verbindungs-Callback zum Debuggen
     a2dp_sink->set_on_connection_state_changed([](esp_a2d_connection_state_t state, void* ptr){
         Serial.printf("[BT] Connection state: %d (2=connected)\n", state);
-        if (state == ESP_A2D_CONNECTION_STATE_CONNECTED)       pending_sound = 1;
-        else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) pending_sound = 2;
+        if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+            pending_sound = 1;
+#if ENABLE_BT_FALLBACK_WITH_AUX
+            bt_connected = true;
+            aux_priority_active = false;
+#endif
+        } else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+            pending_sound = 2;
+#if ENABLE_BT_FALLBACK_WITH_AUX
+            bt_connected = false;
+#endif
+        }
     });
     a2dp_sink->set_on_audio_state_changed([](esp_a2d_audio_state_t state, void* ptr){
         Serial.printf("[BT] Audio state: %d (1=started)\n", state);

@@ -1,7 +1,12 @@
 #include "AudioTools.h"
 #include "BluetoothA2DPSink.h"
 #include <BluetoothSerial.h>
+#include <Preferences.h>
 #include "config.h"   // Zentrale Konfiguration (Pins, WebGUI-Schalter, Defaults)
+#if ENABLE_OLED_MENU
+#include <Wire.h>
+#include <U8g2lib.h>
+#endif
 #if !ENABLE_DAC2
 #include "driver/i2s.h"
 #endif
@@ -60,8 +65,26 @@ CallbackStream*     cb_sub    = nullptr;
 #if !ENABLE_DAC2
 // PCM1808-Line-In auf den ehemaligen DAC2-Pins (I2S Port 1, RX)
 static bool pcm1808_ready = false;
-static uint8_t pcm1808_buf[1024];
+static int32_t pcm1808_rx32[512];
+static int16_t pcm1808_mix16[512];
+#if ENABLE_BT_FALLBACK_WITH_AUX
+static volatile bool aux_priority_active = false;
+static uint32_t aux_last_signal_ms = 0;
+static float aux_mix = 0.0f; // 0 = nur BT, 1 = nur AUX
 #endif
+#endif
+
+Preferences g_prefs;
+bool g_prefs_ready = false;
+
+enum ProfileId : uint8_t {
+    PROFILE_ID_MTH30_TOP = PROFILE_MTH30_TOP,
+    PROFILE_ID_Z2300_SAT = PROFILE_Z2300_SAT,
+    PROFILE_ID_USER = PROFILE_USER,
+};
+
+uint8_t active_profile_id = DEFAULT_PROFILE_ID;
+bool profile_bootstrapped = false;
 
 // Globale DSP-Filtervariablen
 float sub_subsonic = DEFAULT_SUB_SUBSONIC;
@@ -91,6 +114,8 @@ float vol_dac1_l = DEFAULT_VOL_DAC1_L;  // DAC1 L
 float vol_dac1_r = DEFAULT_VOL_DAC1_R;  // DAC1 R
 float vol_dac2_l = DEFAULT_VOL_DAC2_L;  // DAC2 L
 float vol_dac2_r = DEFAULT_VOL_DAC2_R;  // DAC2 R
+float master_gain = STARTUP_MASTER_VOL_PCT / 100.0f;  // Gesamtlautstaerke (0.0 .. 1.0)
+float master_volume_pct_runtime = STARTUP_MASTER_VOL_PCT;
 
 // Limiter-Parameter (zur Laufzeit über die Weboberfläche einstellbar).
 // Startwerte + feste Attack-Zeiten kommen aus config.h.
@@ -210,6 +235,8 @@ struct PeakLimiter {
 PeakLimiter lim_tops;   // Tops (stereo, gemeinsamer Gain für L/R)
 PeakLimiter lim_sub;    // Sub  (mono)
 
+void apply_param(const String& key, float val, bool persist_as_user = true);
+
 // Berechnet den float-Ausgabewert für einen konfigurierten DAC-Kanal.
 // raw_l / raw_r = UNVERARBEITETE 16-Bit-Eingangswerte als float.
 // Jede Filter-Instanz darf pro Sample-Frame nur einmal aufgerufen werden –
@@ -244,6 +271,14 @@ static inline bool ch_uses_delay(int mode) {
 
 // DAC 1 – Verarbeitung (Kanal-Belegung per config.h: DAC1_L_MODE / DAC1_R_MODE)
 size_t process_dac1(uint8_t *data, size_t len) {
+#if !ENABLE_DAC2 && ENABLE_BT_FALLBACK_WITH_AUX
+    float bt_mix = 1.0f - aux_mix;
+    if (bt_mix < 0.001f) {
+        memset(data, 0, len);
+        return len;
+    }
+#endif
+
     // Rohsignal für process_dac2 sichern – vor der In-Place-Modifikation
     s_raw_len = (len <= sizeof(s_raw_buf)) ? len : sizeof(s_raw_buf);
     memcpy(s_raw_buf, data, s_raw_len);
@@ -255,6 +290,12 @@ size_t process_dac1(uint8_t *data, size_t len) {
 
         float l = compute_ch(DAC1_L_MODE, raw_l, raw_r) * vol_dac1_l;
         float r = compute_ch(DAC1_R_MODE, raw_l, raw_r) * vol_dac1_r;
+        l *= master_gain;
+        r *= master_gain;
+    #if !ENABLE_DAC2 && ENABLE_BT_FALLBACK_WITH_AUX
+        l *= bt_mix;
+        r *= bt_mix;
+    #endif
 
         // Delay-Line DAC 1 (Synchronisation mit Sub/Horn)
         dac1_dly_L[dac1_dly_idx] = l;
@@ -288,6 +329,8 @@ size_t process_dac2(uint8_t *data, size_t len) {
 
         float l = compute_ch(DAC2_L_MODE, raw_l, raw_r) * vol_dac2_l;
         float r = compute_ch(DAC2_R_MODE, raw_l, raw_r) * vol_dac2_r;
+        l *= master_gain;
+        r *= master_gain;
 
         // Delay-Line DAC 2 (eigener Ringpuffer, unabhängig von DAC 1)
         dac2_dly_L[dac2_dly_idx] = l;
@@ -311,9 +354,7 @@ size_t process_dac2(uint8_t *data, size_t len) {
 
 #if !ENABLE_DAC2
 // PCM1808 (Stereo) -> Mono-Summe, danach bestehende DSP-Logik fuer DAC1 nutzen.
-static inline void sum_stereo_to_mono_inplace(uint8_t *data, size_t len) {
-    int16_t *samples = (int16_t*)data;
-    int count = (int)(len / 2);
+static inline void sum_stereo_to_mono_inplace(int16_t *samples, int count) {
     for (int i = 0; i + 1 < count; i += 2) {
         int32_t m = ((int32_t)samples[i] + (int32_t)samples[i + 1]) / 2;
         if (m > 32767) m = 32767;
@@ -328,7 +369,7 @@ static void setup_pcm1808_input() {
     i2s_config_t cfg = {};
     cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX);
     cfg.sample_rate = SAMPLE_RATE;
-    cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+    cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT;
     cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
     cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
@@ -361,13 +402,60 @@ static void setup_pcm1808_input() {
 static void service_pcm1808_input() {
     if (!pcm1808_ready || !i2s_tops) return;
     size_t bytes_read = 0;
-    esp_err_t err = i2s_read(I2S_NUM_1, pcm1808_buf, sizeof(pcm1808_buf), &bytes_read, 0);
+    esp_err_t err = i2s_read(I2S_NUM_1, pcm1808_rx32, sizeof(pcm1808_rx32), &bytes_read, 0);
     if (err != ESP_OK || bytes_read < 4) return;
 
+    int sample_count_32 = (int)(bytes_read / sizeof(int32_t));
+    int sample_count_16 = sample_count_32;
+    if (sample_count_16 > (int)(sizeof(pcm1808_mix16) / sizeof(pcm1808_mix16[0]))) {
+        sample_count_16 = (int)(sizeof(pcm1808_mix16) / sizeof(pcm1808_mix16[0]));
+    }
+
+    int peak = 0;
+    for (int i = 0; i < sample_count_16; i++) {
+        // PCM1808 liefert 24-bit in 32-bit Frames -> auf 16-bit skalieren.
+        int16_t s = (int16_t)(pcm1808_rx32[i] >> 16);
+        pcm1808_mix16[i] = s;
+        int v = abs((int)s);
+        if (v > peak) peak = v;
+    }
+
+#if ENABLE_BT_FALLBACK_WITH_AUX
+    uint32_t now = millis();
+    if (peak >= AUX_ACTIVITY_ON_THRESHOLD) {
+        aux_last_signal_ms = now;
+        aux_priority_active = true;
+    } else if (peak <= AUX_ACTIVITY_OFF_THRESHOLD && (now - aux_last_signal_ms) > (unsigned long)AUX_PRIORITY_HOLD_MS) {
+        aux_priority_active = false;
+    }
+
+    float target = aux_priority_active ? 1.0f : 0.0f;
+    if (aux_mix < target) {
+        aux_mix += AUX_BT_XFADE_STEP;
+        if (aux_mix > target) aux_mix = target;
+    } else if (aux_mix > target) {
+        aux_mix -= AUX_BT_XFADE_STEP;
+        if (aux_mix < target) aux_mix = target;
+    }
+    if (aux_mix < 0.001f) return;
+#endif
+
     // Erst summieren, dann wie gewohnt mit den bestehenden DSP-Einstellungen verarbeiten.
-    sum_stereo_to_mono_inplace(pcm1808_buf, bytes_read);
-    process_dac1(pcm1808_buf, bytes_read);
-    i2s_tops->write(pcm1808_buf, bytes_read);
+    sum_stereo_to_mono_inplace(pcm1808_mix16, sample_count_16);
+
+    size_t bytes16 = (size_t)sample_count_16 * sizeof(int16_t);
+    process_dac1((uint8_t*)pcm1808_mix16, bytes16);
+
+#if ENABLE_BT_FALLBACK_WITH_AUX
+    if (aux_mix < 0.999f) {
+        for (int i = 0; i < sample_count_16; i++) {
+            float s = (float)pcm1808_mix16[i] * aux_mix;
+            pcm1808_mix16[i] = (int16_t)constrain(s, -32768.0f, 32767.0f);
+        }
+    }
+#endif
+
+    i2s_tops->write((uint8_t*)pcm1808_mix16, bytes16);
 }
 #endif
 
@@ -462,8 +550,104 @@ void play_pcm_mono(const int16_t* data, size_t samples, float amp = SND_VOLUME) 
     }
 }
 
-// Gemeinsame Parameter-Logik für die Web-Steuerung
-void apply_param(const String& key, float val) {
+static void set_master_volume_pct_runtime(float pct, bool persist) {
+    if (pct < 0.0f) pct = 0.0f;
+    if (pct > 100.0f) pct = 100.0f;
+    master_volume_pct_runtime = pct;
+    master_gain = pct / 100.0f;
+    if (persist && g_prefs_ready) g_prefs.putFloat("master", master_volume_pct_runtime);
+}
+
+static void save_active_profile_id() {
+    if (g_prefs_ready) g_prefs.putUChar("profile", active_profile_id);
+}
+
+static void save_user_profile_to_nvs() {
+    if (!g_prefs_ready) return;
+    g_prefs.putFloat("u_sub_sb", sub_subsonic);
+    g_prefs.putFloat("u_sub_lp", sub_lowpass);
+    g_prefs.putFloat("u_tops_hp", tops_highpass);
+    g_prefs.putFloat("u_t_dly", tops_delay_ms);
+    g_prefs.putFloat("u_v_d1l", vol_dac1_l * 100.0f);
+    g_prefs.putFloat("u_v_d1r", vol_dac1_r * 100.0f);
+    g_prefs.putFloat("u_v_d2l", vol_dac2_l * 100.0f);
+    g_prefs.putFloat("u_v_d2r", vol_dac2_r * 100.0f);
+    g_prefs.putFloat("u_lim_s_th", lim_sub_thresh / 32767.0f * 100.0f);
+    g_prefs.putFloat("u_lim_s_rl", lim_sub_rel);
+    g_prefs.putFloat("u_lim_t_th", lim_tops_thresh / 32767.0f * 100.0f);
+    g_prefs.putFloat("u_lim_t_rl", lim_tops_rel);
+    g_prefs.putFloat("u_master", master_volume_pct_runtime);
+}
+
+static bool load_user_profile_from_nvs() {
+    if (!g_prefs_ready || !g_prefs.isKey("u_sub_sb")) return false;
+    apply_param("sub_sb", g_prefs.getFloat("u_sub_sb", DEFAULT_SUB_SUBSONIC), false);
+    apply_param("sub_lp", g_prefs.getFloat("u_sub_lp", DEFAULT_SUB_LOWPASS), false);
+    apply_param("tops_hp", g_prefs.getFloat("u_tops_hp", DEFAULT_TOPS_HIGHPASS), false);
+    apply_param("t_dly", g_prefs.getFloat("u_t_dly", DEFAULT_TOPS_DELAY_MS), false);
+    apply_param("v_dac1_l", g_prefs.getFloat("u_v_d1l", DEFAULT_VOL_DAC1_L * 100.0f), false);
+    apply_param("v_dac1_r", g_prefs.getFloat("u_v_d1r", DEFAULT_VOL_DAC1_R * 100.0f), false);
+    apply_param("v_dac2_l", g_prefs.getFloat("u_v_d2l", DEFAULT_VOL_DAC2_L * 100.0f), false);
+    apply_param("v_dac2_r", g_prefs.getFloat("u_v_d2r", DEFAULT_VOL_DAC2_R * 100.0f), false);
+    apply_param("lim_s_th", g_prefs.getFloat("u_lim_s_th", DEFAULT_LIM_SUB_THRESH / 32767.0f * 100.0f), false);
+    apply_param("lim_s_rl", g_prefs.getFloat("u_lim_s_rl", DEFAULT_LIM_SUB_REL), false);
+    apply_param("lim_t_th", g_prefs.getFloat("u_lim_t_th", DEFAULT_LIM_TOPS_THRESH / 32767.0f * 100.0f), false);
+    apply_param("lim_t_rl", g_prefs.getFloat("u_lim_t_rl", DEFAULT_LIM_TOPS_REL), false);
+    set_master_volume_pct_runtime(g_prefs.getFloat("u_master", STARTUP_MASTER_VOL_PCT), false);
+    return true;
+}
+
+static void apply_profile(uint8_t profile_id) {
+    if (profile_id > PROFILE_ID_USER) profile_id = DEFAULT_PROFILE_ID;
+    active_profile_id = profile_id;
+
+    if (profile_id == PROFILE_ID_MTH30_TOP) {
+        apply_param("sub_sb", P_MTH30_SUB_SB, false);
+        apply_param("sub_lp", P_MTH30_SUB_LP, false);
+        apply_param("tops_hp", P_MTH30_TOPS_HP, false);
+        apply_param("t_dly", P_MTH30_T_DLY, false);
+        apply_param("v_dac1_l", P_MTH30_V_DAC1_L, false);
+        apply_param("v_dac1_r", P_MTH30_V_DAC1_R, false);
+        apply_param("v_dac2_l", P_MTH30_V_DAC2_L, false);
+        apply_param("v_dac2_r", P_MTH30_V_DAC2_R, false);
+        apply_param("lim_s_th", P_MTH30_LIM_S_TH, false);
+        apply_param("lim_s_rl", P_MTH30_LIM_S_RL, false);
+        apply_param("lim_t_th", P_MTH30_LIM_T_TH, false);
+        apply_param("lim_t_rl", P_MTH30_LIM_T_RL, false);
+        set_master_volume_pct_runtime(P_MTH30_MASTER_VOL, false);
+    } else if (profile_id == PROFILE_ID_Z2300_SAT) {
+        apply_param("sub_sb", P_Z2300_SUB_SB, false);
+        apply_param("sub_lp", P_Z2300_SUB_LP, false);
+        apply_param("tops_hp", P_Z2300_TOPS_HP, false);
+        apply_param("t_dly", P_Z2300_T_DLY, false);
+        apply_param("v_dac1_l", P_Z2300_V_DAC1_L, false);
+        apply_param("v_dac1_r", P_Z2300_V_DAC1_R, false);
+        apply_param("v_dac2_l", P_Z2300_V_DAC2_L, false);
+        apply_param("v_dac2_r", P_Z2300_V_DAC2_R, false);
+        apply_param("lim_s_th", P_Z2300_LIM_S_TH, false);
+        apply_param("lim_s_rl", P_Z2300_LIM_S_RL, false);
+        apply_param("lim_t_th", P_Z2300_LIM_T_TH, false);
+        apply_param("lim_t_rl", P_Z2300_LIM_T_RL, false);
+        set_master_volume_pct_runtime(P_Z2300_MASTER_VOL, false);
+    } else {
+        if (!load_user_profile_from_nvs()) {
+            set_master_volume_pct_runtime(STARTUP_MASTER_VOL_PCT, false);
+            save_user_profile_to_nvs();
+        }
+    }
+
+    save_active_profile_id();
+}
+
+static void activate_user_profile_from_manual_change() {
+    if (!profile_bootstrapped) return;
+    active_profile_id = PROFILE_ID_USER;
+    save_active_profile_id();
+    save_user_profile_to_nvs();
+}
+
+// Gemeinsame Parameter-Logik für Web/BT/OLED
+void apply_param(const String& key, float val, bool persist_as_user) {
     if (key == "sub_sb") {
         if (val >= 30.0) { sub_subsonic = val; sub_sub_L.begin(val, sample_rate); sub_sub_R.begin(val, sample_rate); sub_sub_L2.begin(val, sample_rate); sub_sub_R2.begin(val, sample_rate); }
     } else if (key == "sub_lp") {
@@ -509,7 +693,292 @@ void apply_param(const String& key, float val) {
         lim_tops.begin(lim_tops_thresh, sample_rate, LIM_TOPS_ATTACK_MS, lim_tops_rel);
     }
     Serial.printf("[SET] %s = %.1f\n", key.c_str(), val);
+
+    if (persist_as_user) activate_user_profile_from_manual_change();
 }
+
+#if ENABLE_OLED_MENU
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
+
+struct MenuItem {
+    const char* key;
+    const char* label;
+    float min_v;
+    float max_v;
+    float step;
+    const char* unit;
+};
+
+static const MenuItem kMenuItems[] = {
+    {"profile",  "Profile",    0.0f,   2.0f,   1.0f, ""},
+    {"sub_sb",   "Subsonic",   30.0f,  60.0f,   1.0f, "Hz"},
+    {"sub_lp",   "Sub LP",     60.0f, 180.0f,   1.0f, "Hz"},
+    {"tops_hp",  "Tops HP",    60.0f, 150.0f,   1.0f, "Hz"},
+    {"t_dly",    "Delay",       0.0f,  30.0f,   0.1f, "ms"},
+    {"v_dac1_l", "Vol Sub",     0.0f, 100.0f,   1.0f, "%"},
+    {"v_dac1_r", "Vol Mono",    0.0f, 100.0f,   1.0f, "%"},
+    {"v_dac2_l", "Vol Tops L",  0.0f, 100.0f,   1.0f, "%"},
+    {"v_dac2_r", "Vol Tops R",  0.0f, 100.0f,   1.0f, "%"},
+    {"lim_s_th", "Lim Sub Th", 50.0f, 100.0f,   1.0f, "%"},
+    {"lim_s_rl", "Lim Sub Rel",20.0f, 500.0f,   5.0f, "ms"},
+    {"lim_t_th", "Lim Top Th", 50.0f, 100.0f,   1.0f, "%"},
+    {"lim_t_rl", "Lim Top Rel",10.0f, 500.0f,   5.0f, "ms"},
+};
+
+static const int MENU_COUNT = (int)(sizeof(kMenuItems) / sizeof(kMenuItems[0]));
+static int menu_index = 0;
+static bool menu_edit = false;
+static bool menu_nav_mode = false; // false = Master-Volume, true = Menue
+static bool menu_ready = false;
+static uint32_t menu_last_draw_ms = 0;
+static uint32_t menu_last_input_ms = 0;
+static bool menu_force_redraw = true;
+static bool oled_awake = true;
+static bool oled_dimmed = false;
+
+// Rotary-State (Gray-Code 2-bit)
+static uint8_t enc_prev = 0;
+
+struct DebouncedButton {
+    uint8_t pin;
+    bool last_raw;
+    bool stable;
+    uint32_t last_change_ms;
+};
+
+static DebouncedButton btn_back = {BTN_BACK_PIN, false, false, 0};
+static DebouncedButton btn_confirm = {BTN_CONFIRM_PIN, false, false, 0};
+static DebouncedButton btn_encoder_push = {BTN_ENCODER_PUSH_PIN, false, false, 0};
+
+static bool read_button_pressed(uint8_t pin) {
+#if MENU_BUTTON_ACTIVE_LOW
+    return digitalRead(pin) == LOW;
+#else
+    return digitalRead(pin) == HIGH;
+#endif
+}
+
+static bool button_pressed_event(DebouncedButton& b) {
+    const uint32_t DEBOUNCE_MS = 25;
+    bool raw = read_button_pressed(b.pin);
+    if (raw != b.last_raw) {
+        b.last_raw = raw;
+        b.last_change_ms = millis();
+    }
+    if ((millis() - b.last_change_ms) > DEBOUNCE_MS && raw != b.stable) {
+        b.stable = raw;
+        if (b.stable) return true;
+    }
+    return false;
+}
+
+static float menu_get_value(const char* key) {
+    if (!strcmp(key, "profile")) return (float)active_profile_id;
+    if (!strcmp(key, "sub_sb")) return sub_subsonic;
+    if (!strcmp(key, "sub_lp")) return sub_lowpass;
+    if (!strcmp(key, "tops_hp")) return tops_highpass;
+    if (!strcmp(key, "t_dly")) return tops_delay_ms;
+    if (!strcmp(key, "v_dac1_l")) return vol_dac1_l * 100.0f;
+    if (!strcmp(key, "v_dac1_r")) return vol_dac1_r * 100.0f;
+    if (!strcmp(key, "v_dac2_l")) return vol_dac2_l * 100.0f;
+    if (!strcmp(key, "v_dac2_r")) return vol_dac2_r * 100.0f;
+    if (!strcmp(key, "lim_s_th")) return lim_sub_thresh / 32767.0f * 100.0f;
+    if (!strcmp(key, "lim_s_rl")) return lim_sub_rel;
+    if (!strcmp(key, "lim_t_th")) return lim_tops_thresh / 32767.0f * 100.0f;
+    if (!strcmp(key, "lim_t_rl")) return lim_tops_rel;
+    return 0.0f;
+}
+
+static void set_master_volume_pct(float pct) {
+    set_master_volume_pct_runtime(pct, true);
+    activate_user_profile_from_manual_change();
+}
+
+static void menu_set_value(const MenuItem& item, float value) {
+    if (value < item.min_v) value = item.min_v;
+    if (value > item.max_v) value = item.max_v;
+    if (!strcmp(item.key, "profile")) {
+        uint8_t p = (uint8_t)(value + 0.5f);
+        apply_profile(p);
+        return;
+    }
+    apply_param(item.key, value);
+}
+
+static const char* profile_name(uint8_t p) {
+    if (p == PROFILE_ID_MTH30_TOP) return "MTH30+TOP";
+    if (p == PROFILE_ID_Z2300_SAT) return "Z2300+SAT";
+    return "USER";
+}
+
+static void draw_menu() {
+    if (!menu_ready || !oled_awake) return;
+    char line[40];
+    oled.firstPage();
+    do {
+        oled.setFont(u8g2_font_6x12_tf);
+        if (!menu_nav_mode) {
+            snprintf(line, sizeof(line), "Master Vol: %.0f%%", master_volume_pct_runtime);
+            oled.setFont(u8g2_font_logisoso20_tr);
+            oled.drawStr(0, 40, line);
+            continue;
+        }
+
+        oled.drawStr(0, 10, "DSP Menu");
+        oled.drawStr(76, 10, menu_edit ? "EDIT" : "NAV");
+
+        int top = menu_index - 2;
+        if (top < 0) top = 0;
+        if (top > MENU_COUNT - 4) top = MENU_COUNT - 4;
+        if (top < 0) top = 0;
+
+        for (int row = 0; row < 4; row++) {
+            int idx = top + row;
+            if (idx >= MENU_COUNT) break;
+            int y = 24 + row * 10;
+            bool selected = (idx == menu_index);
+
+            float v = menu_get_value(kMenuItems[idx].key);
+            int decimals = (kMenuItems[idx].step < 1.0f) ? 1 : 0;
+            if (!strcmp(kMenuItems[idx].key, "profile")) {
+                snprintf(line, sizeof(line), "%s %s", kMenuItems[idx].label, profile_name((uint8_t)v));
+            } else {
+                snprintf(line, sizeof(line), "%s %.1f%s", kMenuItems[idx].label, v, kMenuItems[idx].unit);
+                if (decimals == 0) snprintf(line, sizeof(line), "%s %.0f%s", kMenuItems[idx].label, v, kMenuItems[idx].unit);
+            }
+
+            if (selected) {
+                oled.drawBox(0, y - 9, 128, 10);
+                oled.setDrawColor(0);
+                oled.drawStr(1, y, line);
+                oled.setDrawColor(1);
+            } else {
+                oled.drawStr(1, y, line);
+            }
+        }
+    } while (oled.nextPage());
+}
+
+static int read_encoder_delta() {
+    // 4-bit Zustandsautomat: prev(AB)<<2 | curr(AB)
+    static const int8_t table[16] = {0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0};
+    uint8_t a = (uint8_t)digitalRead(ROTARY_PIN_A);
+    uint8_t b = (uint8_t)digitalRead(ROTARY_PIN_B);
+    uint8_t curr = (a << 1) | b;
+    uint8_t idx = (enc_prev << 2) | curr;
+    enc_prev = curr;
+    int d = table[idx];
+#if ROTARY_INVERT_DIR
+    d = -d;
+#endif
+    return d;
+}
+
+static void setup_oled_menu() {
+    pinMode(ROTARY_PIN_A, INPUT_PULLUP);
+    pinMode(ROTARY_PIN_B, INPUT_PULLUP);
+    pinMode(BTN_BACK_PIN, INPUT_PULLUP);
+    pinMode(BTN_CONFIRM_PIN, INPUT_PULLUP);
+    if (BTN_ENCODER_PUSH_PIN != BTN_CONFIRM_PIN && BTN_ENCODER_PUSH_PIN != BTN_BACK_PIN) {
+        pinMode(BTN_ENCODER_PUSH_PIN, INPUT_PULLUP);
+    }
+    btn_back.last_raw = btn_back.stable = read_button_pressed(btn_back.pin);
+    btn_confirm.last_raw = btn_confirm.stable = read_button_pressed(btn_confirm.pin);
+    btn_encoder_push.last_raw = btn_encoder_push.stable = read_button_pressed(btn_encoder_push.pin);
+
+    uint8_t a = (uint8_t)digitalRead(ROTARY_PIN_A);
+    uint8_t b = (uint8_t)digitalRead(ROTARY_PIN_B);
+    enc_prev = (a << 1) | b;
+
+    Wire.begin(OLED_PIN_SDA, OLED_PIN_SCL);
+    oled.setI2CAddress((uint8_t)(OLED_I2C_ADDR << 1));
+    oled.begin();
+    oled.setPowerSave(0);
+    oled.setContrast(OLED_ACTIVE_CONTRAST);
+    set_master_volume_pct_runtime(master_volume_pct_runtime, false);
+    menu_ready = true;
+    menu_force_redraw = true;
+    menu_last_input_ms = millis();
+    menu_nav_mode = false;
+    menu_edit = false;
+    Serial.println("[MENU] OLED + Rotary aktiv");
+}
+
+static void service_oled_menu() {
+    if (!menu_ready) return;
+
+    int d = read_encoder_delta();
+    bool ev_confirm = button_pressed_event(btn_confirm);
+    bool ev_encoder_push = false;
+    if (BTN_ENCODER_PUSH_PIN != BTN_CONFIRM_PIN && BTN_ENCODER_PUSH_PIN != BTN_BACK_PIN) {
+        ev_encoder_push = button_pressed_event(btn_encoder_push);
+    }
+    bool ev_back = button_pressed_event(btn_back);
+    bool ev_enter = ev_confirm || ev_encoder_push;
+
+    if (d != 0 || ev_enter || ev_back) {
+        menu_last_input_ms = millis();
+        if (!oled_awake) {
+            oled_awake = true;
+            oled.setPowerSave(0);
+            oled.setContrast(OLED_ACTIVE_CONTRAST);
+        }
+        if (oled_dimmed) {
+            oled_dimmed = false;
+            oled.setContrast(OLED_ACTIVE_CONTRAST);
+        }
+        menu_force_redraw = true;
+    }
+
+    if (d != 0) {
+        if (!menu_nav_mode) {
+            set_master_volume_pct(master_volume_pct_runtime + d * MASTER_VOL_STEP_PCT);
+        } else if (menu_edit) {
+            const MenuItem& item = kMenuItems[menu_index];
+            float v = menu_get_value(item.key);
+            menu_set_value(item, v + d * item.step);
+        } else {
+            menu_index += d;
+            if (menu_index < 0) menu_index = MENU_COUNT - 1;
+            if (menu_index >= MENU_COUNT) menu_index = 0;
+        }
+    }
+
+    if (ev_enter) {
+        if (!menu_nav_mode) {
+            menu_nav_mode = true;
+            menu_edit = false;
+        } else {
+            menu_edit = !menu_edit;
+        }
+    }
+
+    if (ev_back) {
+        if (menu_edit) {
+            menu_edit = false;
+        } else if (menu_nav_mode) {
+            menu_nav_mode = false;
+        }
+    }
+
+    if (oled_awake && !oled_dimmed && (millis() - menu_last_input_ms > (unsigned long)OLED_DIM_TIMEOUT_SEC * 1000UL)) {
+        oled.setContrast(OLED_DIM_CONTRAST);
+        oled_dimmed = true;
+    }
+
+    if (oled_awake && (millis() - menu_last_input_ms > (unsigned long)OLED_SLEEP_TIMEOUT_SEC * 1000UL)) {
+        oled.setPowerSave(1);
+        oled_awake = false;
+        oled_dimmed = false;
+    }
+
+    if (oled_awake && menu_force_redraw) {
+        draw_menu();
+        menu_last_draw_ms = millis();
+        menu_force_redraw = false;
+    }
+}
+#endif
 
 #if ENABLE_WEBGUI
 // Liefert alle aktuellen DSP-Parameter als JSON (wird beim Seitenload abgerufen)
@@ -546,7 +1015,7 @@ void handle_update() {
 // (WebGUI aus) oder erst nach dem WiFi-Timeout (WebGUI an), damit WLAN und BT
 // nie gleichzeitig Speicher belegen.
 void start_bluetooth() {
-#if !ENABLE_DAC2
+#if !ENABLE_DAC2 && !ENABLE_BT_FALLBACK_WITH_AUX
     // PCM1808-Line-In-Modus nutzt keinen A2DP-Stream als Quelle.
     return;
 #else
@@ -584,7 +1053,7 @@ void setup() {
     Serial.println("[5] new CallbackStream sub");
     cb_sub    = new CallbackStream(*i2s_sub,  process_dac2);
 #endif
-#if ENABLE_DAC2
+#if ENABLE_DAC2 || ENABLE_BT_FALLBACK_WITH_AUX
     Serial.printf("[6] new BluetoothA2DPSink  free heap: %lu\n", (unsigned long)ESP.getFreeHeap());
     a2dp_sink = new BluetoothA2DPSink(*multi_out);
 #else
@@ -595,6 +1064,14 @@ void setup() {
     Serial.println("[7] limiter begin");
     lim_tops.begin(lim_tops_thresh, sample_rate, LIM_TOPS_ATTACK_MS, lim_tops_rel);
     lim_sub.begin(lim_sub_thresh,  sample_rate, LIM_SUB_ATTACK_MS,  lim_sub_rel);
+
+    g_prefs_ready = g_prefs.begin("dspcfg", false);
+    if (!g_prefs_ready) Serial.println("[NVS] open failed, running without persistence");
+
+    uint8_t boot_profile = DEFAULT_PROFILE_ID;
+    if (g_prefs_ready) boot_profile = g_prefs.getUChar("profile", DEFAULT_PROFILE_ID);
+    apply_profile(boot_profile);
+    profile_bootstrapped = true;
 
     // DAC 1 Pins (Canton Tops)
     Serial.println("[8] i2s_tops begin");
@@ -635,7 +1112,7 @@ void setup() {
     multi_out->add(*cb_sub);
 #endif
 
-#if ENABLE_DAC2
+#if ENABLE_DAC2 || ENABLE_BT_FALLBACK_WITH_AUX
     // Verbindungs-Callback zum Debuggen
     a2dp_sink->set_on_connection_state_changed([](esp_a2d_connection_state_t state, void* ptr){
         Serial.printf("[BT] Connection state: %d (2=connected)\n", state);
@@ -735,6 +1212,10 @@ void setup() {
     Serial.println("HTTP server started");
     Serial.println("WebGUI aktiv - Bluetooth startet nach Inaktivitäts-Timeout");
     last_web_activity = millis();
+#endif
+
+#if ENABLE_OLED_MENU
+    setup_oled_menu();
 #endif
 }
 
@@ -866,5 +1347,9 @@ void loop() {
 
 #if !ENABLE_DAC2
     service_pcm1808_input();
+#endif
+
+#if ENABLE_OLED_MENU
+    service_oled_menu();
 #endif
 }

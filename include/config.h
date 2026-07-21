@@ -35,8 +35,8 @@
 
 // OLED (SH1106 128x64, I2C) -- Hersteller-Aufdruck lautet "SH1306" (Tippfehler)
 #define OLED_I2C_ADDR          0x3C
-#define OLED_PIN_SDA           16
-#define OLED_PIN_SCL           17
+#define OLED_PIN_SDA           18
+#define OLED_PIN_SCL           19
 
 // Rotary-Encoder (HC11): A/B fuer Drehung
 #define ROTARY_PIN_A           25

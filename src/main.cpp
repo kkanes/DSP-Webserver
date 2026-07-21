@@ -1061,6 +1061,21 @@ void setup() {
     delay(200); // UART settle
     Serial.printf("\n\n=== SETUP START  free heap: %lu ===\n", (unsigned long)ESP.getFreeHeap());
 
+    // I2C Scanner
+#if ENABLE_OLED_MENU
+    Wire.begin(OLED_PIN_SDA, OLED_PIN_SCL);
+    Serial.println("\n[I2C] Scanne alle Adressen...");
+    int found = 0;
+    for (byte addr = 0; addr < 128; addr++) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+            Serial.printf("  -> I2C Device: 0x%02X (%d)\n", addr, addr);
+            found++;
+        }
+    }
+    Serial.printf("[I2C] Insgesamt %d Device(s) gefunden\n\n", found);
+#endif
+
     // Audio-Objekte hier auf dem Heap erzeugen (Heap ist jetzt initialisiert)
     Serial.println("[1] new I2SStream tops");
     i2s_tops  = new I2SStream();

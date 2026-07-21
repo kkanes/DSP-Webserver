@@ -34,9 +34,9 @@
 #define ENABLE_OLED_MENU       1
 
 // OLED (SH1106 128x64, I2C) -- Hersteller-Aufdruck lautet "SH1306" (Tippfehler)
-#define OLED_I2C_ADDR          0x3D
-#define OLED_PIN_SDA           18
-#define OLED_PIN_SCL           19
+#define OLED_I2C_ADDR          0x3C
+#define OLED_PIN_SDA           16
+#define OLED_PIN_SCL           17
 
 // Rotary-Encoder (HC11): A/B fuer Drehung
 #define ROTARY_PIN_A           25
@@ -85,7 +85,7 @@
 #define P_MTH30_TOPS_HP        95.0f
 #define P_MTH30_T_DLY          0.0f
 #define P_MTH30_V_DAC1_L       80.0f
-#define P_MTH30_V_DAC1_R       80.0f
+#define P_MTH30_V_DAC1_R       20.0f
 #define P_MTH30_V_DAC2_L       80.0f
 #define P_MTH30_V_DAC2_R       80.0f
 #define P_MTH30_LIM_S_TH       98.0f
@@ -100,7 +100,7 @@
 #define P_Z2300_TOPS_HP        100.0f
 #define P_Z2300_T_DLY          0.0f
 #define P_Z2300_V_DAC1_L       80.0f
-#define P_Z2300_V_DAC1_R       80.0f
+#define P_Z2300_V_DAC1_R       20.0f
 #define P_Z2300_V_DAC2_L       60.0f
 #define P_Z2300_V_DAC2_R       60.0f
 #define P_Z2300_LIM_S_TH       92.0f

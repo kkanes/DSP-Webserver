@@ -118,6 +118,11 @@ float vol_dac2_r = DEFAULT_VOL_DAC2_R;  // DAC2 R
 float master_gain = STARTUP_MASTER_VOL_PCT / 100.0f;  // Gesamtlautstaerke (0.0 .. 1.0)
 float master_volume_pct_runtime = STARTUP_MASTER_VOL_PCT;
 
+// Poti-Smoothing (exponentieller MA, alpha=0.1 = sanfte Glättung)
+static float poti_l_smooth = 0.5f;
+static float poti_r_smooth = 0.5f;
+const float POTI_ALPHA = 0.1f;  // Smoothing-Faktor (0.0 = stark geglättet, 1.0 = keine Glättung)
+
 // Limiter-Parameter (zur Laufzeit über die Weboberfläche einstellbar).
 // Startwerte + feste Attack-Zeiten kommen aus config.h.
 float lim_tops_thresh = DEFAULT_LIM_TOPS_THRESH;   // Ziel-Spitzenwert Tops
@@ -1137,6 +1142,13 @@ void setup() {
         }
     }
     Serial.printf("[I2C] Insgesamt %d Device(s) gefunden\n\n", found);
+
+    // ADC für Potentiometer konfigurieren
+    analogReadResolution(12);  // 12-bit (0-4095)
+    analogSetAttenuation(ADC_11db);  // 0-3.3V Bereich
+    pinMode(POT_PIN_DAC1_L, INPUT);
+    pinMode(POT_PIN_DAC1_R, INPUT);
+    Serial.println("[ADC] Potentiometer auf GPIO 34/35 aktiviert");
 #endif
 
     // Audio-Objekte hier auf dem Heap erzeugen (Heap ist jetzt initialisiert)
@@ -1427,6 +1439,26 @@ void handle_bt_serial() {
 #endif
 
 void loop() {
+    // Potentiometer auslesen und Volume regeln
+#if ENABLE_OLED_MENU
+    int raw_l = analogRead(POT_PIN_DAC1_L);
+    int raw_r = analogRead(POT_PIN_DAC1_R);
+
+    // Normalisieren auf 0.0-1.0 (12-bit: 0-4095)
+    float norm_l = raw_l / 4095.0f;
+    float norm_r = raw_r / 4095.0f;
+
+    // Exponentielles Moving Average (Smoothing gegen Jitter)
+    poti_l_smooth = poti_l_smooth * (1.0f - POTI_ALPHA) + norm_l * POTI_ALPHA;
+    poti_r_smooth = poti_r_smooth * (1.0f - POTI_ALPHA) + norm_r * POTI_ALPHA;
+
+    // Volumes aktualisieren
+    vol_dac1_l = poti_l_smooth;
+    vol_dac1_r = poti_r_smooth;
+
+    DEBUG_LOG("Poti: L=%.1f%% R=%.1f%%", vol_dac1_l * 100.0f, vol_dac1_r * 100.0f);
+#endif
+
     if (pending_sound) {
         int s = pending_sound;
         pending_sound = 0;

@@ -2,6 +2,7 @@
 #include "BluetoothA2DPSink.h"
 #include <BluetoothSerial.h>
 #include <Preferences.h>
+#include <cmath>
 #include "config.h"   // Zentrale Konfiguration (Pins, WebGUI-Schalter, Defaults)
 #if ENABLE_OLED_MENU
 #include <Wire.h>
@@ -1449,6 +1450,8 @@ void loop() {
     float norm_r = raw_r / 4095.0f;
 
     // Exponentielles Moving Average (Smoothing gegen Jitter)
+    float old_l = poti_l_smooth;
+    float old_r = poti_r_smooth;
     poti_l_smooth = poti_l_smooth * (1.0f - POTI_ALPHA) + norm_l * POTI_ALPHA;
     poti_r_smooth = poti_r_smooth * (1.0f - POTI_ALPHA) + norm_r * POTI_ALPHA;
 
@@ -1456,7 +1459,11 @@ void loop() {
     vol_dac1_l = poti_l_smooth;
     vol_dac1_r = poti_r_smooth;
 
-    DEBUG_LOG("Poti: L=%.1f%% R=%.1f%%", vol_dac1_l * 100.0f, vol_dac1_r * 100.0f);
+    // OLED aktualisieren, wenn sich die Werte signifikant ändern (>2%)
+    if (fabs(poti_l_smooth - old_l) > 0.02f || fabs(poti_r_smooth - old_r) > 0.02f) {
+        menu_force_redraw = true;
+        DEBUG_LOG("Poti: L=%.0f%% R=%.0f%%", vol_dac1_l * 100.0f, vol_dac1_r * 100.0f);
+    }
 #endif
 
     if (pending_sound) {

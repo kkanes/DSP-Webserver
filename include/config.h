@@ -4,6 +4,16 @@
 // Alle einstellbaren Werte an einem Ort. Nach Änderungen neu hochladen.
 // =====================================================================
 
+// --- Debug -------------------------------------------------------
+#ifndef DEBUG_EVENTS
+#define DEBUG_EVENTS 0
+#endif
+#if DEBUG_EVENTS
+#define DEBUG_LOG(fmt, ...) Serial.printf("[DEBUG] " fmt "\n", ##__VA_ARGS__)
+#else
+#define DEBUG_LOG(fmt, ...) do {} while(0)
+#endif
+
 // --- Weboberfläche / WLAN-Access-Point -------------------------------
 // 1 = WebGUI + AP aktiv, 0 = komplett aus (volle Funkzeit fürs Bluetooth)
 #define ENABLE_WEBGUI          0
@@ -69,6 +79,20 @@
 // Sicherheits-Startlautstaerke nach Power-On/Reset (in %)
 // Gilt immer beim Boot, unabhaengig von OLED/Web/BT.
 #define STARTUP_MASTER_VOL_PCT 15.0f
+
+// --- Analoge Lautstaerke-Potis fuer DAC1 (Sub/Mono) -------------------
+// 1 = zwei Drehpotis regeln v_dac1_l/v_dac1_r direkt (per ADC ausgelesen).
+// Ueberschreibt WebGUI/BT/OLED-Werte, sobald am Poti gedreht wird.
+#define ENABLE_POT_VOLUME      1
+#define POT_PIN_DAC1_L         34   // ADC1_CH6, input-only, kein WLAN/BT-Konflikt
+#define POT_PIN_DAC1_R         35   // ADC1_CH7, input-only, kein WLAN/BT-Konflikt
+
+// Glaettung des ADC-Rohwerts (0..1, kleiner = traeger/glatter, groesser = direkter)
+#define POT_SMOOTHING_ALPHA    0.1f
+// Mindestaenderung in %, bevor ein neuer Wert uebernommen wird (Rauschunterdrueckung)
+#define POT_DEADBAND_PCT       0.5f
+// Wartezeit ohne weitere Bewegung, bis der Wert im NVS gespeichert wird (ms)
+#define POT_SAVE_DEBOUNCE_MS   1500
 
 // --- Profile ---------------------------------------------------------
 // 0 = MTH30+TOP, 1 = Z2300+SAT, 2 = USER

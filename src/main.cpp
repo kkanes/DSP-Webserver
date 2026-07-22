@@ -558,6 +558,7 @@ static void set_master_volume_pct_runtime(float pct, bool persist) {
     if (pct > 100.0f) pct = 100.0f;
     master_volume_pct_runtime = pct;
     master_gain = pct / 100.0f;
+    DEBUG_LOG("Master Volume: %.0f%%", pct);
     if (persist && g_prefs_ready) g_prefs.putFloat("master", master_volume_pct_runtime);
 }
 
@@ -990,6 +991,16 @@ static void service_oled_menu() {
     }
     bool ev_back = button_pressed_event(btn_back);
     bool ev_enter = ev_confirm || ev_encoder_push;
+
+    if (d != 0) {
+        DEBUG_LOG("Rotary: d=%d, mode=%s", d, menu_nav_mode ? "MENU" : "VOL");
+    }
+    if (ev_enter) {
+        DEBUG_LOG("Event: ENTER pressed");
+    }
+    if (ev_back) {
+        DEBUG_LOG("Event: BACK pressed");
+    }
 
     if (d != 0 || ev_enter || ev_back) {
         menu_last_input_ms = millis();

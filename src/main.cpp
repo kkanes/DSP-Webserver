@@ -700,6 +700,54 @@ void apply_param(const String& key, float val, bool persist_as_user) {
     if (persist_as_user) activate_user_profile_from_manual_change();
 }
 
+#if ENABLE_POT_VOLUME
+// Zwei Drehpotis regeln v_dac1_l/v_dac1_r direkt per ADC.
+struct PotChannel {
+    uint8_t pin;
+    const char* key;
+    float smoothed;            // geglätteter ADC-Rohwert (0..4095)
+    float last_committed_pct;  // zuletzt an apply_param() übergebener Wert, -1 = noch nie
+    uint32_t last_change_ms;
+    bool pending_save;
+};
+
+static PotChannel pot_dac1_l = {POT_PIN_DAC1_L, "v_dac1_l", 0.0f, -1.0f, 0, false};
+static PotChannel pot_dac1_r = {POT_PIN_DAC1_R, "v_dac1_r", 0.0f, -1.0f, 0, false};
+
+static void service_pot_channel(PotChannel& ch) {
+    int raw = analogRead(ch.pin);
+    ch.smoothed += (raw - ch.smoothed) * POT_SMOOTHING_ALPHA;
+
+    float pct = ch.smoothed / 4095.0f * 100.0f;
+    if (pct < 0.0f) pct = 0.0f;
+    if (pct > 100.0f) pct = 100.0f;
+
+    if (ch.last_committed_pct < 0.0f || fabsf(pct - ch.last_committed_pct) >= POT_DEADBAND_PCT) {
+        apply_param(ch.key, pct, false);   // sofort hörbar, aber noch nicht ins NVS schreiben
+        ch.last_committed_pct = pct;
+        ch.last_change_ms = millis();
+        ch.pending_save = true;
+    } else if (ch.pending_save && millis() - ch.last_change_ms >= POT_SAVE_DEBOUNCE_MS) {
+        apply_param(ch.key, ch.last_committed_pct, true);  // Poti steht still -> jetzt persistieren
+        ch.pending_save = false;
+    }
+}
+
+static void setup_pot_volume() {
+    analogSetPinAttenuation(POT_PIN_DAC1_L, ADC_11db);
+    analogSetPinAttenuation(POT_PIN_DAC1_R, ADC_11db);
+    // Mit aktueller Poti-Stellung vorbelegen, damit beim ersten service_pot_volume()
+    // kein Sprung vom (falschen) Default-Wert aus passiert.
+    pot_dac1_l.smoothed = analogRead(POT_PIN_DAC1_L);
+    pot_dac1_r.smoothed = analogRead(POT_PIN_DAC1_R);
+}
+
+static void service_pot_volume() {
+    service_pot_channel(pot_dac1_l);
+    service_pot_channel(pot_dac1_r);
+}
+#endif
+
 #if ENABLE_OLED_MENU
 U8G2_SH1106_128X64_NONAME_F_SW_I2C oled(U8G2_R0, /* clock=*/ OLED_PIN_SCL, /* data=*/ OLED_PIN_SDA, /* reset=*/ U8X8_PIN_NONE);
 
@@ -821,8 +869,12 @@ static void draw_menu() {
     do {
         oled.setFont(u8g2_font_6x12_tf);
         if (!menu_nav_mode) {
-            snprintf(line, sizeof(line), "Master Vol: %.0f%%", master_volume_pct_runtime);
-            oled.setFont(u8g2_font_logisoso20_tr);
+            oled.setFont(u8g2_font_6x12_tf);
+            snprintf(line, sizeof(line), "Master: %.0f%%", master_volume_pct_runtime);
+            oled.drawStr(0, 12, line);
+            snprintf(line, sizeof(line), "Vol R: %.0f%%", vol_dac2_r * 100.0f);
+            oled.drawStr(0, 26, line);
+            snprintf(line, sizeof(line), "Vol L: %.0f%%", vol_dac2_l * 100.0f);
             oled.drawStr(0, 40, line);
             continue;
         }
@@ -1265,6 +1317,9 @@ void setup() {
 #if ENABLE_OLED_MENU
     setup_oled_menu();
 #endif
+#if ENABLE_POT_VOLUME
+    setup_pot_volume();
+#endif
 }
 
 // WiFi-AP + Webserver + DNS abschalten (Inaktivitäts-Timeout), dann Bluetooth an
@@ -1399,5 +1454,8 @@ void loop() {
 
 #if ENABLE_OLED_MENU
     service_oled_menu();
+#endif
+#if ENABLE_POT_VOLUME
+    service_pot_volume();
 #endif
 }

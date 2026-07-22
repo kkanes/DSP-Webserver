@@ -119,9 +119,9 @@
 #define P_MTH30_MASTER_VOL     STARTUP_MASTER_VOL_PCT
 
 // Preset: Z2300 + SAT
-#define P_Z2300_SUB_SB         35.0f
-#define P_Z2300_SUB_LP         100.0f
-#define P_Z2300_TOPS_HP        100.0f
+#define P_Z2300_SUB_SB         38.0f
+#define P_Z2300_SUB_LP         150.0f
+#define P_Z2300_TOPS_HP        150.0f
 #define P_Z2300_T_DLY          0.0f
 #define P_Z2300_V_DAC1_L       80.0f
 #define P_Z2300_V_DAC1_R       20.0f
@@ -173,13 +173,20 @@
 #define DEFAULT_SUB_LOWPASS    95.0f    // Hz  Sub-Tiefpass (Trennfrequenz)
 #define DEFAULT_TOPS_HIGHPASS  95.0f   // Hz  Tops-Hochpass
 
+// --- Filter-Typ und Ordnung --------------------------------------------------
+// FILTER_TYPE: 0=Butterworth (flach), 1=Bessel (minimum phase), 2=Chebyshev (steil)
+#define FILTER_TYPE 0
+
+// FILTER_ORDER: 0=LR12 (12dB/Okt), 1=LR24 (24dB/Okt), 2=LR48 (48dB/Okt)
+#define FILTER_ORDER 1
+
 // --- Tops-Delay (Synchronisation zum Sub/Horn) -----------------------
 #define DEFAULT_TOPS_DELAY_MS  0.0f     // ms
 
 // --- Lautstärke pro Kanal (0.0 .. 1.0) ------------------------------
 // Jeder der vier DAC-Ausgänge hat einen eigenen Lautstärkewert.
 // Zur Laufzeit per WebGUI oder apply_param() änderbar.
-#define DEFAULT_VOL_DAC1_L     0.2f    // DAC1 L  (aktuell: Subwoofer)
+#define DEFAULT_VOL_DAC1_L     0.8f    // DAC1 L  (aktuell: Subwoofer)
 #define DEFAULT_VOL_DAC1_R     0.2f    // DAC1 R  (aktuell: Stereo-Mono)
 #define DEFAULT_VOL_DAC2_L     0.8f    // DAC2 L  (aktuell: Tops L)
 #define DEFAULT_VOL_DAC2_R     0.8f    // DAC2 R  (aktuell: Tops R)
@@ -187,7 +194,7 @@
 // --- Koppel-/Entkoppel-Ton ------------------------------------------
 // Lautstärke der Signaltöne (0.0 .. 1.0). Klein halten, damit der Ton beim
 // Verbinden nicht zu laut ist. Gilt für Beep-Melodie und PCM-Clips.
-#define SND_VOLUME             0.05f
+#define SND_VOLUME             0.005f
 
 // --- Limiter ---------------------------------------------------------
 // Threshold in Sample-Einheiten (max. 32767), Release/Attack in ms.

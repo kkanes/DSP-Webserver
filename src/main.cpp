@@ -132,22 +132,34 @@ float lim_sub_thresh  = DEFAULT_LIM_SUB_THRESH;    // Ziel-Spitzenwert Sub
 float lim_sub_rel     = DEFAULT_LIM_SUB_REL;       // Release Sub (ms)
 
 // Filter-Instanzen für die Kanäle
-// Alle Trennfilter als Linkwitz-Riley 24 dB/Okt (LR24) =
-// Kaskade aus 2 identischen Butterworth-Biquads (Q=0.707) pro Kanal.
+// Alle Trennfilter als Linkwitz-Riley konfigurierbar (LR12/LR24/LR48) =
+// Kaskade aus bis zu 4 Biquads pro Kanal.
 LowPassFilter<float> sub_lp_L(sub_lowpass, sample_rate);
 LowPassFilter<float> sub_lp_R(sub_lowpass, sample_rate);
 LowPassFilter<float> sub_lp_L2(sub_lowpass, sample_rate);
 LowPassFilter<float> sub_lp_R2(sub_lowpass, sample_rate);
-// Subsonic-Filter: LR24 (Horn-Schutz)
+LowPassFilter<float> sub_lp_L3(sub_lowpass, sample_rate);
+LowPassFilter<float> sub_lp_R3(sub_lowpass, sample_rate);
+LowPassFilter<float> sub_lp_L4(sub_lowpass, sample_rate);
+LowPassFilter<float> sub_lp_R4(sub_lowpass, sample_rate);
+// Subsonic-Filter: konfigurierbar (Horn-Schutz)
 HighPassFilter<float> sub_sub_L(sub_subsonic, sample_rate);
 HighPassFilter<float> sub_sub_R(sub_subsonic, sample_rate);
 HighPassFilter<float> sub_sub_L2(sub_subsonic, sample_rate);
 HighPassFilter<float> sub_sub_R2(sub_subsonic, sample_rate);
+HighPassFilter<float> sub_sub_L3(sub_subsonic, sample_rate);
+HighPassFilter<float> sub_sub_R3(sub_subsonic, sample_rate);
+HighPassFilter<float> sub_sub_L4(sub_subsonic, sample_rate);
+HighPassFilter<float> sub_sub_R4(sub_subsonic, sample_rate);
 
 HighPassFilter<float> tops_hp_L(tops_highpass, sample_rate);
 HighPassFilter<float> tops_hp_R(tops_highpass, sample_rate);
 HighPassFilter<float> tops_hp_L2(tops_highpass, sample_rate);
 HighPassFilter<float> tops_hp_R2(tops_highpass, sample_rate);
+HighPassFilter<float> tops_hp_L3(tops_highpass, sample_rate);
+HighPassFilter<float> tops_hp_R3(tops_highpass, sample_rate);
+HighPassFilter<float> tops_hp_L4(tops_highpass, sample_rate);
+HighPassFilter<float> tops_hp_R4(tops_highpass, sample_rate);
 
 #if ENABLE_WEBGUI
 // Web-GUI: Konfigurationsoberfläche (Captive Portal / WLAN-AP)
@@ -242,6 +254,70 @@ struct PeakLimiter {
 PeakLimiter lim_tops;   // Tops (stereo, gemeinsamer Gain für L/R)
 PeakLimiter lim_sub;    // Sub  (mono)
 
+// Helper: Q-Faktor basierend auf Filter-Typ
+static float get_q_factor() {
+    switch (FILTER_TYPE) {
+        case 0: return 0.7071f;   // Butterworth (standard)
+        case 1: return 0.5773f;   // Bessel (minimum phase)
+        case 2: return 1.3065f;   // Chebyshev 0.5dB ripple
+        default: return 0.7071f;
+    }
+}
+
+// Helper: Anzahl der Filter-Stufen basierend auf Ordnung
+static int get_filter_stages() {
+    // FILTER_ORDER: 0=LR12 (1 Biquad), 1=LR24 (2 Biquads), 2=LR48 (4 Biquads)
+    return (FILTER_ORDER + 1);
+}
+
+// Aktualisiert alle Filter mit korrektem Q-Faktor und Frequenzen
+static void update_all_filters(float q_factor = -1.0f) {
+    if (q_factor < 0) q_factor = get_q_factor();
+    int stages = get_filter_stages();
+
+    // Sub Subsonic (HighPass)
+    sub_sub_L.begin(sub_subsonic, sample_rate, q_factor);
+    sub_sub_R.begin(sub_subsonic, sample_rate, q_factor);
+    if (stages >= 2) {
+        sub_sub_L2.begin(sub_subsonic, sample_rate, q_factor);
+        sub_sub_R2.begin(sub_subsonic, sample_rate, q_factor);
+    }
+    if (stages >= 4) {
+        sub_sub_L3.begin(sub_subsonic, sample_rate, q_factor);
+        sub_sub_R3.begin(sub_subsonic, sample_rate, q_factor);
+        sub_sub_L4.begin(sub_subsonic, sample_rate, q_factor);
+        sub_sub_R4.begin(sub_subsonic, sample_rate, q_factor);
+    }
+
+    // Sub LowPass
+    sub_lp_L.begin(sub_lowpass, sample_rate, q_factor);
+    sub_lp_R.begin(sub_lowpass, sample_rate, q_factor);
+    if (stages >= 2) {
+        sub_lp_L2.begin(sub_lowpass, sample_rate, q_factor);
+        sub_lp_R2.begin(sub_lowpass, sample_rate, q_factor);
+    }
+    if (stages >= 4) {
+        sub_lp_L3.begin(sub_lowpass, sample_rate, q_factor);
+        sub_lp_R3.begin(sub_lowpass, sample_rate, q_factor);
+        sub_lp_L4.begin(sub_lowpass, sample_rate, q_factor);
+        sub_lp_R4.begin(sub_lowpass, sample_rate, q_factor);
+    }
+
+    // Tops HighPass
+    tops_hp_L.begin(tops_highpass, sample_rate, q_factor);
+    tops_hp_R.begin(tops_highpass, sample_rate, q_factor);
+    if (stages >= 2) {
+        tops_hp_L2.begin(tops_highpass, sample_rate, q_factor);
+        tops_hp_R2.begin(tops_highpass, sample_rate, q_factor);
+    }
+    if (stages >= 4) {
+        tops_hp_L3.begin(tops_highpass, sample_rate, q_factor);
+        tops_hp_R3.begin(tops_highpass, sample_rate, q_factor);
+        tops_hp_L4.begin(tops_highpass, sample_rate, q_factor);
+        tops_hp_R4.begin(tops_highpass, sample_rate, q_factor);
+    }
+}
+
 void apply_param(const String& key, float val, bool persist_as_user = true);
 
 // Berechnet den float-Ausgabewert für einen konfigurierten DAC-Kanal.
@@ -249,18 +325,47 @@ void apply_param(const String& key, float val, bool persist_as_user = true);
 // Jede Filter-Instanz darf pro Sample-Frame nur einmal aufgerufen werden –
 // denselben Modus also nie auf zwei Kanälen gleichzeitig konfigurieren.
 static float compute_ch(int mode, float raw_l, float raw_r) {
+    int stages = get_filter_stages();
+
     switch (mode) {
         case DAC_CH_SUB: {
             float m = 0.5f * (raw_l + raw_r);
-            m = sub_sub_L2.process(sub_sub_L.process(m));
-            return sub_lp_L2.process(sub_lp_L.process(m));
+            // Subsonic cascade
+            m = sub_sub_L.process(m);
+            if (stages >= 2) m = sub_sub_L2.process(m);
+            if (stages >= 4) {
+                m = sub_sub_L3.process(m);
+                m = sub_sub_L4.process(m);
+            }
+            // LowPass cascade
+            m = sub_lp_L.process(m);
+            if (stages >= 2) m = sub_lp_L2.process(m);
+            if (stages >= 4) {
+                m = sub_lp_L3.process(m);
+                m = sub_lp_L4.process(m);
+            }
+            return m;
         }
         case DAC_CH_MONO:
             return 0.5f * (raw_l + raw_r);
-        case DAC_CH_TOPS_L:
-            return tops_hp_L2.process(tops_hp_L.process(raw_l));
-        case DAC_CH_TOPS_R:
-            return tops_hp_R2.process(tops_hp_R.process(raw_r));
+        case DAC_CH_TOPS_L: {
+            float l = tops_hp_L.process(raw_l);
+            if (stages >= 2) l = tops_hp_L2.process(l);
+            if (stages >= 4) {
+                l = tops_hp_L3.process(l);
+                l = tops_hp_L4.process(l);
+            }
+            return l;
+        }
+        case DAC_CH_TOPS_R: {
+            float r = tops_hp_R.process(raw_r);
+            if (stages >= 2) r = tops_hp_R2.process(r);
+            if (stages >= 4) {
+                r = tops_hp_R3.process(r);
+                r = tops_hp_R4.process(r);
+            }
+            return r;
+        }
         case DAC_CH_LEFT:
             return raw_l;
         case DAC_CH_RIGHT:
@@ -658,16 +763,53 @@ static void activate_user_profile_from_manual_change() {
 
 // Gemeinsame Parameter-Logik für Web/BT/OLED
 void apply_param(const String& key, float val, bool persist_as_user) {
+    float q = get_q_factor();
+    int stages = get_filter_stages();
+
     if (key == "sub_sb") {
-        if (val >= 30.0) { sub_subsonic = val; sub_sub_L.begin(val, sample_rate); sub_sub_R.begin(val, sample_rate); sub_sub_L2.begin(val, sample_rate); sub_sub_R2.begin(val, sample_rate); }
+        if (val >= 30.0) {
+            sub_subsonic = val;
+            sub_sub_L.begin(val, sample_rate, q);
+            sub_sub_R.begin(val, sample_rate, q);
+            if (stages >= 2) {
+                sub_sub_L2.begin(val, sample_rate, q);
+                sub_sub_R2.begin(val, sample_rate, q);
+            }
+            if (stages >= 4) {
+                sub_sub_L3.begin(val, sample_rate, q);
+                sub_sub_R3.begin(val, sample_rate, q);
+                sub_sub_L4.begin(val, sample_rate, q);
+                sub_sub_R4.begin(val, sample_rate, q);
+            }
+        }
     } else if (key == "sub_lp") {
         sub_lowpass = val;
-        sub_lp_L.begin(sub_lowpass, sample_rate); sub_lp_R.begin(sub_lowpass, sample_rate);
-        sub_lp_L2.begin(sub_lowpass, sample_rate); sub_lp_R2.begin(sub_lowpass, sample_rate);
+        sub_lp_L.begin(sub_lowpass, sample_rate, q);
+        sub_lp_R.begin(sub_lowpass, sample_rate, q);
+        if (stages >= 2) {
+            sub_lp_L2.begin(sub_lowpass, sample_rate, q);
+            sub_lp_R2.begin(sub_lowpass, sample_rate, q);
+        }
+        if (stages >= 4) {
+            sub_lp_L3.begin(sub_lowpass, sample_rate, q);
+            sub_lp_R3.begin(sub_lowpass, sample_rate, q);
+            sub_lp_L4.begin(sub_lowpass, sample_rate, q);
+            sub_lp_R4.begin(sub_lowpass, sample_rate, q);
+        }
     } else if (key == "tops_hp") {
         tops_highpass = val;
-        tops_hp_L.begin(tops_highpass, sample_rate); tops_hp_R.begin(tops_highpass, sample_rate);
-        tops_hp_L2.begin(tops_highpass, sample_rate); tops_hp_R2.begin(tops_highpass, sample_rate);
+        tops_hp_L.begin(tops_highpass, sample_rate, q);
+        tops_hp_R.begin(tops_highpass, sample_rate, q);
+        if (stages >= 2) {
+            tops_hp_L2.begin(tops_highpass, sample_rate, q);
+            tops_hp_R2.begin(tops_highpass, sample_rate, q);
+        }
+        if (stages >= 4) {
+            tops_hp_L3.begin(tops_highpass, sample_rate, q);
+            tops_hp_R3.begin(tops_highpass, sample_rate, q);
+            tops_hp_L4.begin(tops_highpass, sample_rate, q);
+            tops_hp_R4.begin(tops_highpass, sample_rate, q);
+        }
     } else if (key == "t_dly") {
         tops_delay_ms = val;
         int s = (int)(tops_delay_ms * sample_rate / 1000.0);
@@ -1186,6 +1328,15 @@ void setup() {
     if (g_prefs_ready) boot_profile = g_prefs.getUChar("profile", DEFAULT_PROFILE_ID);
     apply_profile(boot_profile);
     profile_bootstrapped = true;
+
+    // Filter-System mit korrektem Typ, Ordnung und Q-Faktor initialisieren
+    float q = get_q_factor();
+    int stages = get_filter_stages();
+    update_all_filters(q);
+    const char* filter_types[] = {"Butterworth", "Bessel", "Chebyshev"};
+    int filter_db_oct = stages * 12;
+    Serial.printf("[Filter] Type=%s, Order=LR%d (%ddB/Oct), Q=%.4f\n",
+        filter_types[FILTER_TYPE], filter_db_oct, filter_db_oct, q);
 
     // DAC 1 Pins (Canton Tops)
     Serial.println("[8] i2s_tops begin");

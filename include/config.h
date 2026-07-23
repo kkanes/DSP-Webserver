@@ -117,18 +117,24 @@
 #define P_MTH30_MASTER_VOL     STARTUP_MASTER_VOL_PCT
 
 // Preset: Z2300 + SAT
-#define P_Z2300_SUB_SB         35.0f
-#define P_Z2300_SUB_LP         100.0f
-#define P_Z2300_TOPS_HP        100.0f
+#define P_Z2300_SUB_SB         50.0f
+#define P_Z2300_SUB_LP         80.0f
+
+#define P_Z2300_TOPS_HP        80.0f
+
 #define P_Z2300_T_DLY          0.0f
+
 #define P_Z2300_V_DAC1_L       80.0f
 #define P_Z2300_V_DAC1_R       20.0f
+
 #define P_Z2300_V_DAC2_L       60.0f
 #define P_Z2300_V_DAC2_R       60.0f
-#define P_Z2300_LIM_S_TH       92.0f
-#define P_Z2300_LIM_S_RL       120.0f
-#define P_Z2300_LIM_T_TH       95.0f
-#define P_Z2300_LIM_T_RL       90.0f
+
+#define P_Z2300_LIM_S_TH       31200.0f // 50V
+#define P_Z2300_LIM_S_RL       200.0f
+
+#define P_Z2300_LIM_T_TH       17560.0f
+#define P_Z2300_LIM_T_RL       30.0f
 
 /*
 #define LIM_TOPS_ATTACK_MS      2.0f

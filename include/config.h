@@ -14,13 +14,6 @@
 #define DEBUG_LOG(fmt, ...) do {} while(0)
 #endif
 
-// --- Weboberfläche / WLAN-Access-Point -------------------------------
-// 1 = WebGUI + AP aktiv, 0 = komplett aus (volle Funkzeit fürs Bluetooth)
-#define ENABLE_WEBGUI          0
-#define AP_SSID                "Kevaier-DSP"
-#define AP_PASSWORD            "subwoofer123"
-#define WIFI_TIMEOUT_SEC       5        // Sekunden bis WLAN bei Inaktivität abschaltet
-
 // --- Bluetooth -------------------------------------------------------
 #define BT_DEVICE_NAME         "Kevaier-Audio"
 
@@ -119,9 +112,9 @@
 #define P_MTH30_MASTER_VOL     STARTUP_MASTER_VOL_PCT
 
 // Preset: Z2300 + SAT
-#define P_Z2300_SUB_SB         38.0f
-#define P_Z2300_SUB_LP         150.0f
-#define P_Z2300_TOPS_HP        150.0f
+#define P_Z2300_SUB_SB         50.0f
+#define P_Z2300_SUB_LP         80.0f
+#define P_Z2300_TOPS_HP        80.0f
 #define P_Z2300_T_DLY          0.0f
 #define P_Z2300_V_DAC1_L       80.0f
 #define P_Z2300_V_DAC1_R       20.0f
@@ -198,12 +191,29 @@
 
 // --- Limiter ---------------------------------------------------------
 // Threshold in Sample-Einheiten (max. 32767), Release/Attack in ms.
-#define LIM_TOPS_ATTACK_MS      1.0f
-#define LIM_SUB_ATTACK_MS       5.0f
-#define DEFAULT_LIM_TOPS_THRESH 32000.0f
-#define DEFAULT_LIM_TOPS_REL    100.0f
-#define DEFAULT_LIM_SUB_THRESH  32000.0f
-#define DEFAULT_LIM_SUB_REL     150.0f
+#define LIM_TOPS_ATTACK_MS      2.0f
+#define LIM_SUB_ATTACK_MS       20.0f
+#define DEFAULT_LIM_TOPS_THRESH 17560.0f
+#define DEFAULT_LIM_TOPS_REL    30.0f
+#define DEFAULT_LIM_SUB_THRESH  2100.0f
+#define DEFAULT_LIM_SUB_REL     200.0f
+
+//LIMTIER FÜR CANTON TOPS mit z-2300 SUB
+/*
+// --- Limiter ---------------------------------------------------------
+// Threshold in Sample-Einheiten (max. 32767), Release/Attack in ms.
+
+// TOPTEILE (2x Canton Plus GX.3 parallel an Kanal 1+2)
+#define LIM_TOPS_ATTACK_MS      2.0f      // Schneller Schutz für die Hochtöner
+#define DEFAULT_LIM_TOPS_REL    30.0f     // Schnelles Öffnen für natürlichen Klang
+#define DEFAULT_LIM_TOPS_THRESH 17560.0f  // Begrenzt auf sichere ~50W pro Box an 2 Ohm
+
+// SUBWOOFER (Logitech Z-2300 Chassis an einem einzelnen 8-Ohm-Kanal)
+#define LIM_SUB_ATTACK_MS       20.0f     // Schützt vor Verzerrungen bei 50Hz Low-Cut
+#define DEFAULT_LIM_SUB_REL     200.0f    // Verhindert das "Bass-Pumpen"
+#define DEFAULT_LIM_SUB_THRESH  21000.0f  // Riegelt ab, bevor der einzelne Kanal ins Clipping gerät (~35-40W)
+
+*/
 
 // --- DAC-Kanal-Routing -----------------------------------------------
 // Legt fest, welches Signal auf jedem der vier DAC-Ausgänge liegt.

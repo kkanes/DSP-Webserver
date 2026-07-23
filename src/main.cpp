@@ -11,34 +11,7 @@
 #if !ENABLE_DAC2
 #include "driver/i2s.h"
 #endif
-#if ENABLE_WEBGUI
-#include <WiFi.h>
-#include <WebServer.h>
-#include <DNSServer.h>
-#include "esp_coexist.h"
-#endif
 #include "sounds.h"   // Optionale Sprach-/Audio-Clips (WAV im Flash)
-
-#if ENABLE_WEBGUI
-const char* ap_ssid = AP_SSID;
-const char* ap_password = AP_PASSWORD;
-
-// Feste AP-IP + DNS-Server für Captive Portal (automatisches Öffnen der Bedienseite)
-IPAddress ap_ip(192, 168, 4, 1);
-IPAddress ap_gw(192, 168, 4, 1);
-IPAddress ap_mask(255, 255, 255, 0);
-const byte DNS_PORT = 53;
-DNSServer dnsServer;
-
-WebServer server(80);
-
-// Inaktivitäts-Timeout: WiFi-AP + Webserver abschalten, wenn längere Zeit
-// niemand die Weiche bedient. Gibt Bluetooth die volle Funkzeit (besserer
-// Sound) und spart Strom. Wird bei jedem Webzugriff zurückgesetzt.
-const unsigned long WIFI_TIMEOUT_MS = (unsigned long)WIFI_TIMEOUT_SEC * 1000UL;
-unsigned long last_web_activity = 0;
-volatile bool bt_switch_requested = false;  // GUI-Button: sofort auf BT wechseln
-#endif
 
 bool bt_started = false;                    // Bluetooth erst nach WiFi-Timeout starten
 
@@ -161,69 +134,6 @@ HighPassFilter<float> tops_hp_R3(tops_highpass, sample_rate);
 HighPassFilter<float> tops_hp_L4(tops_highpass, sample_rate);
 HighPassFilter<float> tops_hp_R4(tops_highpass, sample_rate);
 
-#if ENABLE_WEBGUI
-// Web-GUI: Konfigurationsoberfläche (Captive Portal / WLAN-AP)
-const char HTML_GUI[] = R"rawliteral(
-<!DOCTYPE html><html>
-<head><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>DSP Weiche</title>
-<style>
-body{font-family:'Segoe UI',Arial,sans-serif;background:#121212;color:#fff;padding:12px;margin:0}
-.container{max-width:500px;margin:auto}
-.card{background:#1e1e1e;padding:16px;border-radius:12px;margin-bottom:16px;border-left:5px solid #00adb5;box-shadow:0 4px 12px rgba(0,0,0,.5)}
-.card.t2{border-left-color:#ff5722}
-h1{font-size:1.4em;text-align:center;color:#eee;margin:8px 0 16px}
-h2{margin:0 0 10px;font-size:1.1em;color:#00adb5}
-.t2 h2{color:#ff5722}
-hr{border:none;border-top:1px solid #333;margin:10px 0}
-.row{display:flex;align-items:center;gap:6px;margin:6px 0}
-.row label{flex:0 0 150px;font-size:.82em;color:#ccc;text-align:left}
-.row input[type=range]{flex:1;accent-color:#00adb5;min-width:0}
-.t2 .row input[type=range]{accent-color:#ff5722}
-.row input[type=number]{width:54px;background:#2a2a2a;border:1px solid #444;border-radius:5px;color:#fff;padding:3px 4px;font-size:.85em;text-align:right;-moz-appearance:textfield}
-.row input[type=number]::-webkit-inner-spin-button{opacity:1}
-.row span{font-size:.78em;color:#888;flex:0 0 20px}
-btn{display:block;width:100%;padding:13px;font-size:1em;font-weight:bold;color:#fff;background:#0055bb;border:none;border-radius:10px;cursor:pointer;margin-top:8px}
-#msg{text-align:center;color:#00adb5;min-height:1.2em;margin-top:6px}
-</style></head>
-<body><div class="container">
-<h1>&#127927; DSP Weiche</h1>
-
-<div class="card">
-<h2>DAC 1 &ndash; Subwoofer / Mono</h2><hr>
-<div class="row"><label>&#128266; Sub Lautst.</label><input type="range" id="v_dac1_l" min="0" max="100" value="80" oninput="sl('v_dac1_l',this.value)"><input type="number" id="v_dac1_l_i" min="0" max="100" value="80" onchange="si('v_dac1_l',this.value)"><span>%</span></div>
-<div class="row"><label>&#128266; Mono Lautst.</label><input type="range" id="v_dac1_r" min="0" max="100" value="20" oninput="sl('v_dac1_r',this.value)"><input type="number" id="v_dac1_r_i" min="0" max="100" value="20" onchange="si('v_dac1_r',this.value)"><span>%</span></div>
-<hr>
-<div class="row"><label>Subsonic (Horn-Schutz)</label><input type="range" id="sub_sb" min="40" max="60" value="42" oninput="sl('sub_sb',this.value)"><input type="number" id="sub_sb_i" min="30" max="60" value="42" onchange="si('sub_sb',this.value)"><span>Hz</span></div>
-<div class="row"><label>Tiefpass (Trennung)</label><input type="range" id="sub_lp" min="60" max="180" value="95" oninput="sl('sub_lp',this.value)"><input type="number" id="sub_lp_i" min="60" max="180" value="95" onchange="si('sub_lp',this.value)"><span>Hz</span></div>
-<hr>
-<div class="row"><label>Limiter Threshold</label><input type="range" id="lim_s_th" min="50" max="100" value="98" oninput="sl('lim_s_th',this.value)"><input type="number" id="lim_s_th_i" min="50" max="100" value="98" onchange="si('lim_s_th',this.value)"><span>%</span></div>
-<div class="row"><label>Limiter Release</label><input type="range" id="lim_s_rl" min="20" max="500" value="150" oninput="sl('lim_s_rl',this.value)"><input type="number" id="lim_s_rl_i" min="20" max="500" value="150" onchange="si('lim_s_rl',this.value)"><span>ms</span></div>
-</div>
-
-<div class="card t2">
-<h2>DAC 2 &ndash; Tops L / R</h2><hr>
-<div class="row"><label>&#128266; Tops L Lautst.</label><input type="range" id="v_dac2_l" min="0" max="100" value="80" oninput="sl('v_dac2_l',this.value)"><input type="number" id="v_dac2_l_i" min="0" max="100" value="80" onchange="si('v_dac2_l',this.value)"><span>%</span></div>
-<div class="row"><label>&#128266; Tops R Lautst.</label><input type="range" id="v_dac2_r" min="0" max="100" value="80" oninput="sl('v_dac2_r',this.value)"><input type="number" id="v_dac2_r_i" min="0" max="100" value="80" onchange="si('v_dac2_r',this.value)"><span>%</span></div>
-<hr>
-<div class="row"><label>Hochpass (Entlastung)</label><input type="range" id="tops_hp" min="60" max="150" value="120" oninput="sl('tops_hp',this.value)"><input type="number" id="tops_hp_i" min="60" max="150" value="120" onchange="si('tops_hp',this.value)"><span>Hz</span></div>
-<div class="row"><label>Delay (Sync zum Sub)</label><input type="range" id="t_dly" min="0" max="30" step="0.1" value="0" oninput="sl('t_dly',this.value)"><input type="number" id="t_dly_i" min="0" max="30" step="0.1" value="0" onchange="si('t_dly',this.value)"><span>ms</span></div>
-<hr>
-<div class="row"><label>Limiter Threshold</label><input type="range" id="lim_t_th" min="50" max="100" value="98" oninput="sl('lim_t_th',this.value)"><input type="number" id="lim_t_th_i" min="50" max="100" value="98" onchange="si('lim_t_th',this.value)"><span>%</span></div>
-<div class="row"><label>Limiter Release</label><input type="range" id="lim_t_rl" min="10" max="500" value="100" oninput="sl('lim_t_rl',this.value)"><input type="number" id="lim_t_rl_i" min="10" max="500" value="100" onchange="si('lim_t_rl',this.value)"><span>ms</span></div>
-</div>
-
-<button class="btn" onclick="switchBT()">&#127911; Auf Bluetooth wechseln (WLAN aus)</button>
-<div id="msg"></div>
-</div>
-<script>
-function sl(id,v){document.getElementById(id+'_i').value=v;fetch('/set?'+id+'='+v);}
-function si(id,v){var s=document.getElementById(id);v=Math.min(Math.max(parseFloat(v)||0,parseFloat(s.min)),parseFloat(s.max));document.getElementById(id+'_i').value=v;s.value=v;fetch('/set?'+id+'='+v);}
-function switchBT(){document.getElementById('msg').innerText='WLAN wird abgeschaltet, Bluetooth startet...';fetch('/bt');}
-window.onload=function(){fetch('/status').then(function(r){return r.json();}).then(function(d){for(var k in d){var s=document.getElementById(k),i=document.getElementById(k+'_i');if(s)s.value=d[k];if(i)i.value=d[k];}}).catch(function(){});};}
-</script></body></html>
-)rawliteral";
-#endif // ENABLE_WEBGUI
 
 // --- Peak-Limiter ----------------------------------------------------------
 // Sanfter Pegelbegrenzer: senkt die Verstärkung mit Attack/Release, bevor das
@@ -1214,37 +1124,6 @@ static void service_oled_menu() {
 }
 #endif
 
-#if ENABLE_WEBGUI
-// Liefert alle aktuellen DSP-Parameter als JSON (wird beim Seitenload abgerufen)
-void handle_status() {
-    last_web_activity = millis();
-    char buf[320];
-    snprintf(buf, sizeof(buf),
-        "{\"sub_sb\":%.1f,\"sub_lp\":%.1f,\"tops_hp\":%.1f,\"t_dly\":%.1f,"
-        "\"v_dac1_l\":%.0f,\"v_dac1_r\":%.0f,\"v_dac2_l\":%.0f,\"v_dac2_r\":%.0f,"
-        "\"lim_s_th\":%.0f,\"lim_s_rl\":%.0f,\"lim_t_th\":%.0f,\"lim_t_rl\":%.0f}",
-        sub_subsonic, sub_lowpass, tops_highpass, tops_delay_ms,
-        vol_dac1_l * 100.0f, vol_dac1_r * 100.0f,
-        vol_dac2_l * 100.0f, vol_dac2_r * 100.0f,
-        lim_sub_thresh  / 32767.0f * 100.0f, lim_sub_rel,
-        lim_tops_thresh / 32767.0f * 100.0f, lim_tops_rel);
-    server.send(200, "application/json", buf);
-}
-
-void handle_update() {
-    last_web_activity = millis();
-    const char* keys[] = {
-        "sub_sb","sub_lp","tops_hp","t_dly",
-        "v_dac1_l","v_dac1_r","v_dac2_l","v_dac2_r",
-        "v_tops","v_sub",
-        "lim_s_th","lim_s_rl","lim_t_th","lim_t_rl"
-    };
-    for (auto k : keys)
-        if (server.hasArg(k)) apply_param(k, server.arg(k).toFloat());
-    server.send(200, "text/plain", "OK");
-}
-#endif // ENABLE_WEBGUI
-
 // Bluetooth-A2DP starten (einmalig). Wird entweder direkt beim Boot aufgerufen
 // (WebGUI aus) oder erst nach dem WiFi-Timeout (WebGUI an), damit WLAN und BT
 // nie gleichzeitig Speicher belegen.
@@ -1497,21 +1376,6 @@ void setup() {
 #endif
 }
 
-// WiFi-AP + Webserver + DNS abschalten (Inaktivitäts-Timeout), dann Bluetooth an
-#if ENABLE_WEBGUI
-void shutdown_wifi() {
-    Serial.println("WiFi-Timeout: AP + Webserver werden abgeschaltet");
-    server.stop();
-    dnsServer.stop();
-    WiFi.softAPdisconnect(true);
-    WiFi.mode(WIFI_OFF);
-    wifi_active = false;
-    Serial.println("WiFi aus -> Bluetooth wird gestartet");
-    // Jetzt ist der WLAN-Speicher frei -> Bluetooth kann sauber starten
-    start_bluetooth();
-}
-#endif
-
 #if ENABLE_BT_CONFIG
 // Eingehende SPP-Zeichen verarbeiten (zeilenweise Befehle).
 // Wird im loop() aufgerufen, blockiert nicht.
@@ -1634,21 +1498,6 @@ void loop() {
 #if ENABLE_BT_CONFIG
     if (bt_started) handle_bt_serial();
 #endif
-#if ENABLE_WEBGUI
-    static bool wifi_active = true;
-    if (wifi_active) {
-        dnsServer.processNextRequest();
-        server.handleClient();
-        // GUI-Button gedrückt -> sofort auf Bluetooth wechseln
-        if (bt_switch_requested) {
-            delay(150);          // kurz warten, damit die HTTP-Antwort raus ist
-            shutdown_wifi();
-        } else if (millis() - last_web_activity > WIFI_TIMEOUT_MS) {
-            shutdown_wifi();
-        }
-    }
-#endif
-
 #if !ENABLE_DAC2
     service_pcm1808_input();
 #endif

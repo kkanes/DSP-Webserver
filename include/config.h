@@ -89,6 +89,8 @@
 #define POT_DEADBAND_PCT       0.5f
 // Wartezeit ohne weitere Bewegung, bis der Wert im NVS gespeichert wird (ms)
 #define POT_SAVE_DEBOUNCE_MS   1500
+// Potentiometer-Kontrolle aktivieren (1 = Potis regeln Volumes, 0 = nur Bluetooth)
+#define ENABLE_POTI_CONTROL    0
 
 // --- Profile ---------------------------------------------------------
 // 0 = MTH30+TOP, 1 = Z2300+SAT, 2 = USER

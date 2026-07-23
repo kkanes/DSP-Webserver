@@ -1456,7 +1456,7 @@ void handle_bt_serial() {
 
 void loop() {
     // Potentiometer auslesen und Volume regeln
-#if ENABLE_OLED_MENU
+#if ENABLE_POTI_CONTROL && ENABLE_OLED_MENU
     int raw_l = analogRead(POT_PIN_DAC1_L);
     int raw_r = analogRead(POT_PIN_DAC1_R);
 

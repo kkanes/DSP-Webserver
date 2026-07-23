@@ -4,6 +4,9 @@
 // Alle einstellbaren Werte an einem Ort. Nach Änderungen neu hochladen.
 // =====================================================================
 
+//DSP-Version
+// für esp-32 
+
 // --- Debug -------------------------------------------------------
 #ifndef DEBUG_EVENTS
 #define DEBUG_EVENTS 0
